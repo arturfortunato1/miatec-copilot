@@ -124,6 +124,6 @@ def _build_prompt(transcript: list, roles: dict) -> str:
 
 
 def _structure_with_claude(user_content: str) -> dict:
-    data = claude_json(_SYSTEM, user_content, max_tokens=1500)
+    data = claude_json(_SYSTEM, user_content, max_tokens=2500)  # headroom: verbose real notes were near the old 1500 cap
     # Validate by constructing the model — raises on bad shape, so the caller falls back.
     return ClinicalNote(**data).model_dump()

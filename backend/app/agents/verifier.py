@@ -131,7 +131,9 @@ def _verify_with_llm(note: dict, evidence: list) -> dict:
     slim_ev = [{"index": i, "claim": e.get("claim"), "source": e.get("source")}
                for i, e in enumerate(evidence)]
     payload = json.dumps({"note": slim_note, "evidence": slim_ev}, ensure_ascii=False)
-    data = claude_json(_SYSTEM, payload, max_tokens=900, temperature=0)
+    # 2000 (was 900): 6 pt-BR verdicts + concerns + summary overran 900 tokens → JSON truncated
+    # mid-string ("Unterminated string") → parse fail → stub. Generous budget so the object always closes.
+    data = claude_json(_SYSTEM, payload, max_tokens=2000, temperature=0)
     if not isinstance(data, dict):
         raise ValueError("expected a JSON object")
     return data

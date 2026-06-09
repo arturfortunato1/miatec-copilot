@@ -109,7 +109,9 @@ def _summarize(considerations: list) -> tuple:
 
 def _rank_with_claude(note: dict, evidence: list, quality: dict) -> list:
     payload = json.dumps({"note": note, "evidence": evidence, "quality_context": quality}, ensure_ascii=False)
-    data = claude_json(_SYSTEM, payload, max_tokens=1200, temperature=0)
+    # 2500 (was 1200): ranked differentials with detailed pt-BR rationales overran 1200 tokens → JSON
+    # truncated mid-string → parse fail → stub. Generous budget so the array always closes.
+    data = claude_json(_SYSTEM, payload, max_tokens=2500, temperature=0)
     if not isinstance(data, list):
         raise ValueError("expected a JSON array of considerations")
     return [Consideration(**item).model_dump() for item in data]  # validate each; raises → fallback
