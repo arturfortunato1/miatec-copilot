@@ -38,6 +38,7 @@ type AgentEvent = {
   error?: string;
   quality_score?: number | null;
   degraded?: boolean;
+  vocabulary?: boolean;
   transcript?: TranscriptSegment[];
   roles?: SpeakerRoles;
   note?: ClinicalNote | string;
@@ -105,7 +106,7 @@ export default function Cockpit() {
   const [writeResult, setWriteResult] = useState<MiatecWriteResult | null>(null);
   const [approved, setApproved] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [audio, setAudio] = useState<{ name?: string; source?: string }>({});
+  const [audio, setAudio] = useState<{ name?: string; source?: string; vocabulary?: boolean }>({});
   const [qualityScore, setQualityScore] = useState<number | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const actId = useRef(0);
@@ -145,6 +146,7 @@ export default function Cockpit() {
     if (ev.agent === "scribe") {
       if (ev.audio) setAudio((a) => ({ ...a, name: ev.audio }));
       if (ev.source) setAudio((a) => ({ ...a, source: ev.source }));
+      if (typeof ev.vocabulary === "boolean") setAudio((a) => ({ ...a, vocabulary: ev.vocabulary }));
       if (typeof ev.quality_score === "number") setQualityScore(ev.quality_score);
       if (ev.transcript) setTranscript(ev.transcript);
     }
@@ -419,7 +421,7 @@ export default function Cockpit() {
                   <h2 className="text-sm font-semibold text-zinc-300">Transcript</h2>
                   {audio.name && (
                     <span className={`rounded px-1.5 py-0.5 text-[10px] ${realAudio ? "bg-emerald-500/15 text-emerald-300" : "bg-zinc-800 text-zinc-400"}`}>
-                      {realAudio ? `${audio.name} · AWS Transcribe` : "sample transcript"}
+                      {realAudio ? `${audio.name} · AWS Transcribe${audio.vocabulary ? " + clinical vocab" : ""}` : "sample transcript"}
                     </span>
                   )}
                   {transcript.length > 0 && <span className="text-[11px] text-zinc-500">{transcript.length} turns</span>}

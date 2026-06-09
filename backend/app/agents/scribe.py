@@ -29,6 +29,7 @@ import httpx
 from app.aws import aws_configured, client
 from app.events import publish
 from app.schema import TranscriptSegment
+from app.vocab import vocabulary_if_ready
 
 AGENT = "scribe"
 _POLL_TIMEOUT_S = 600  # real consultations run ~10 min; batch transcription needs headroom
@@ -54,18 +55,19 @@ async def run_scribe(state: dict) -> dict:
     await publish(session_id, {"agent": AGENT, "status": "running",
                                "step": f"Preparing to transcribe {audio_name}…", "audio": audio_name})
 
-    segments, source = None, "mock"
+    segments, source, vocab = None, "mock", None
     if audio_ref and aws_configured():
-        cached = _load_cache(audio_ref)
+        vocab = await asyncio.to_thread(vocabulary_if_ready)  # pt-BR clinical lexicon, if provisioned
+        cached = _load_cache(audio_ref, vocab)
         if cached is not None:
             segments, source = cached, "cache"
             await publish(session_id, {"agent": AGENT, "status": "running",
                                        "step": f"Loaded cached transcript ({len(segments)} turns) — skipping re-transcription"})
         else:
             try:
-                segments = await _transcribe_live(session_id, audio_ref)
+                segments = await _transcribe_live(session_id, audio_ref, vocab)
                 source = "s3"
-                _save_cache(audio_ref, segments)
+                _save_cache(audio_ref, vocab, segments)
             except Exception as exc:  # noqa: BLE001 — surface, then fall back so the demo survives
                 await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
                                            "step": "Transcribe failed — falling back to the sample transcript"})
@@ -87,7 +89,8 @@ async def run_scribe(state: dict) -> dict:
     summary, reason = _summarize(segments, source)
     await publish(session_id, {"agent": AGENT, "status": "done", "transcript": segments,
                                "summary": summary, "reason": reason, "source": source, "audio": audio_name,
-                               "quality_score": quality_score, "degraded": source == "mock"})
+                               "quality_score": quality_score, "degraded": source == "mock",
+                               "vocabulary": bool(vocab)})
     return {"transcript": segments, "quality_score": quality_score}
 
 
@@ -104,15 +107,16 @@ def _summarize(segments: list, source: str) -> tuple:
     return summary, reason
 
 
-async def _transcribe_live(session_id: str, audio_ref: str) -> list:
+async def _transcribe_live(session_id: str, audio_ref: str, vocab=None) -> list:
     """Start an AWS Transcribe pt-BR batch job with diarization, poll it (narrating progress), parse."""
     await publish(session_id, {"agent": AGENT, "status": "running", "step": "Locating audio in S3…"})
     s3_uri = await asyncio.to_thread(_ensure_in_s3, audio_ref)
 
     job_name = f"miatec-scribe-{uuid.uuid4().hex[:12]}"
+    vstep = " + pt-BR clinical vocabulary" if vocab else ""
     await publish(session_id, {"agent": AGENT, "status": "running",
-                               "step": "Starting AWS Transcribe job (pt-BR, speaker diarization)…"})
-    await asyncio.to_thread(_start_job, job_name, s3_uri)
+                               "step": f"Starting AWS Transcribe job (pt-BR, speaker diarization{vstep})…"})
+    await asyncio.to_thread(_start_job, job_name, s3_uri, vocab)
 
     start = time.monotonic()
     while True:
@@ -136,12 +140,15 @@ async def _transcribe_live(session_id: str, audio_ref: str) -> list:
     return _parse_transcript(data)
 
 
-def _start_job(job_name: str, s3_uri: str) -> None:
+def _start_job(job_name: str, s3_uri: str, vocab=None) -> None:
+    settings = {"ShowSpeakerLabels": True, "MaxSpeakerLabels": 2}
+    if vocab:
+        settings["VocabularyName"] = vocab   # bias recognition toward the pt-BR clinical lexicon
     client("transcribe").start_transcription_job(
         TranscriptionJobName=job_name,
         LanguageCode="pt-BR",
         Media={"MediaFileUri": s3_uri},  # MediaFormat omitted → Transcribe auto-detects (m4a, mp3, wav, …)
-        Settings={"ShowSpeakerLabels": True, "MaxSpeakerLabels": 2},
+        Settings=settings,
     )
 
 
@@ -150,15 +157,15 @@ def _get_job(job_name: str) -> dict:
 
 
 # ── transcript cache (per audio_ref) ──────────────────────────────────────────
-def _cache_path(audio_ref: str) -> pathlib.Path:
-    digest = hashlib.sha1(audio_ref.encode("utf-8")).hexdigest()[:16]
+def _cache_path(audio_ref: str, vocab=None) -> pathlib.Path:
+    digest = hashlib.sha1(f"{audio_ref}|vocab={vocab or ''}".encode("utf-8")).hexdigest()[:16]
     return _CACHE_DIR / f"{digest}.json"
 
 
-def _load_cache(audio_ref: str):
+def _load_cache(audio_ref: str, vocab=None):
     if os.getenv("SCRIBE_CACHE", "1") == "0":
         return None
-    path = _cache_path(audio_ref)
+    path = _cache_path(audio_ref, vocab)
     if not path.exists():
         return None
     try:
@@ -167,12 +174,12 @@ def _load_cache(audio_ref: str):
         return None
 
 
-def _save_cache(audio_ref: str, segments: list) -> None:
+def _save_cache(audio_ref: str, vocab, segments: list) -> None:
     if os.getenv("SCRIBE_CACHE", "1") == "0":
         return
     try:
         _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _cache_path(audio_ref).write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
+        _cache_path(audio_ref, vocab).write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
     except Exception:  # noqa: BLE001 — caching is best-effort
         pass
 
