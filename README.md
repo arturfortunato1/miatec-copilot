@@ -1,8 +1,9 @@
 # miatec copilot
 
 **The doctor just talks.** A team of agents transcribes the consultation, attributes each turn to
-doctor or patient, structures it into a clinical note, grounds it in real evidence, ranks differential
-considerations, pauses for the doctor to approve — then writes the finished record into **miatec**.
+doctor or patient, structures it into a clinical note, grounds it in real evidence, checks that the
+evidence actually supports the note, ranks differential considerations, pauses for the doctor to
+approve — then writes the finished record into **miatec**.
 
 Built for the **NEXT Hackathon**. The bet: this rubric scores your *agents* — legible orchestration, a
 real human-in-the-loop gate, real tool use (real APIs taking real actions), and explicit failure
@@ -21,22 +22,29 @@ handling. See [`NEXT_Hackathon_Build_Plan.md`](./NEXT_Hackathon_Build_Plan.md) f
 2. **Roles** attributes each speaker to **doctor or patient** — a reasoned step with a confidence score.
 3. **Structuring** turns the role-labeled transcript into a validated SOAP note.
 4. **Evidence** grounds it with cited guidelines/literature (Exa).
-5. **Considerations** ranks differential considerations with rationale + evidence links.
-6. **⏸ Human-in-the-loop** — the doctor confirms speakers, edits, dismisses, approves.
-7. **Record** writes the approved note into miatec.
+5. **Verifier** cross-checks that the evidence actually supports the note's assessment — low alignment routes a conditional branch and makes the next step hedge.
+6. **Considerations** ranks differential considerations with rationale + evidence links.
+7. **⏸ Human-in-the-loop** — the doctor confirms speakers, edits, dismisses, approves.
+8. **Record** writes the approved note into miatec.
 
 ## Architecture
 
+One compiled LangGraph `StateGraph` (native `interrupt()` + checkpointer) with **two confidence-driven
+gates** — the graph decides when to ask for help.
+
 ```mermaid
 flowchart TD
-    A([audio]) --> S[Scribe · AWS Transcribe]
+    A([audio]) --> S[Scribe · AWS Transcribe + clinical vocab]
     S -->|spk_0 / spk_1 + confidence| R[Roles · Amazon Nova]
     R -->|doctor / patient| ST[Structuring · Amazon Nova]
     ST -->|SOAP note| EV[Evidence · Exa]
-    EV -->|citations| CO[Considerations · Amazon Nova]
+    EV -->|citations| VF[Verifier · Amazon Nova]
+    VF -->|evidence ↔ note alignment| CO[Considerations · Amazon Nova]
     CO --> H{{⏸ Human-in-the-loop<br/>confirm speakers · edit · approve}}
     H -->|approved| RE[Record · miatec]
     RE --> DB[(miatec record)]
+    R -.->|low confidence| RV[[roles review gate]] -.-> ST
+    VF -.->|weak / contradicting| RC[[reconcile gate]] -.-> CO
 ```
 
 | Agent | Job | Real tool/API | Scores under |
@@ -45,11 +53,12 @@ flowchart TD
 | **Roles** | diarized speakers → doctor/patient + confidence | Amazon Nova (Bedrock) | Autonomy + Failure Handling |
 | **Structuring** | transcript → validated SOAP JSON | Amazon Nova (Bedrock) | Autonomy & Decision-Making |
 | **Evidence** | symptoms → cited guidelines | **Exa** | Tool Use + Exa prize |
+| **Verifier** | does the evidence support the note? → alignment + caution | Amazon Nova (Bedrock) | Autonomy + Failure Handling |
 | **Considerations** | note + evidence → ranked differentials | Amazon Nova (Bedrock) | Autonomy & Decision-Making |
 | **Record** | approved note → into miatec | **miatec** | Actions & Tool Use — *the moat* |
-| **Orchestrator** | order, state, HITL gates, failures | LangGraph | Orchestration + Failure Handling |
+| **Orchestrator** | one StateGraph, native interrupt, two conditional gates, state, failures | LangGraph | Orchestration + Failure Handling |
 
-> **LLM note:** Roles / Structuring / Considerations run on **Amazon Nova** via Bedrock (the workshop
+> **LLM note:** Roles / Structuring / Verifier / Considerations run on **Amazon Nova** via Bedrock (the workshop
 > AWS account allows Amazon models; third-party Bedrock models are blocked). Setting `ANTHROPIC_API_KEY`
 > transparently upgrades them to **Claude** via the Anthropic API. Details in [`docs/INTEGRATIONS.md`](docs/INTEGRATIONS.md).
 
@@ -59,15 +68,17 @@ flowchart TD
 .
 ├── backend/            FastAPI + LangGraph — agent orchestration + REST/SSE API
 │   └── app/
-│       ├── agents/     one file per agent: scribe, roles, structuring, evidence, considerations, record
-│       ├── graph.py    the orchestration graph (screenshot this for the slide)
+│       ├── agents/     one file per agent: scribe, roles, structuring, evidence, verifier, considerations, record
+│       ├── graph.py    the single orchestration graph — interrupt() + 2 conditional gates (screenshot for the slide)
 │       ├── llm.py      Claude (Anthropic API) or Amazon Nova (Bedrock) — one interface
 │       ├── aws.py      lazy boto3 clients (Transcribe, S3, Bedrock)
+│       ├── vocab.py    pt-BR clinical custom vocabulary for Transcribe (provision: python -m app.vocab)
+│       ├── retry.py    visible-retry wrapper for LLM/Exa calls
 │       ├── schema.py   typed clinical-note + encounter-state contract
 │       ├── events.py   in-memory SSE pub/sub
 │       └── main.py     REST + SSE endpoints + the HITL gates (/roles, /approve)
 ├── frontend/           Next.js + Tailwind — the doctor cockpit (live SSE)
-│   └── src/app/page.tsx  cockpit: agent rail, roles panel + swap, note, evidence, considerations
+│   └── src/app/page.tsx  cockpit: agent rail w/ live reasoning, quality gauge, verifier panel, roles swap, note, evidence
 ├── docs/               INTEGRATIONS.md (live stack) · SPEAKER_ATTRIBUTION.md (roles design)
 ├── .env.example        all sponsor keys in one place
 └── NEXT_Hackathon_Build_Plan.md
@@ -104,7 +115,8 @@ speakers, edit the note, dismiss a consideration → **Approve & Write to miatec
 | `agents/roles.py` | Nova/Claude role attribution + confidence; HITL confirm/swap (`POST /roles`) |
 | `agents/structuring.py` | Nova/Claude strict-JSON SOAP, Pydantic-validated |
 | `agents/evidence.py` | Exa `search_and_contents` — real guideline citations |
-| `agents/considerations.py` | Nova/Claude ranked differentials |
+| `agents/verifier.py` | Nova/Claude evidence↔note alignment check; low alignment → caution branch |
+| `agents/considerations.py` | Nova/Claude ranked differentials (hedges on low alignment) |
 | `agents/record.py` | miatec encounter (entered via the miatec app frontend — see INTEGRATIONS) |
 
 If a key/credential is missing, that agent silently uses its stub, so the cockpit demo never breaks.
@@ -113,17 +125,18 @@ If a key/credential is missing, that agent silently uses its stub, so the cockpi
 
 | Judging dimension | Where it's earned |
 |---|---|
-| **Agent Overview** | 6 agents + orchestrator, one file each (`backend/app/agents/`) |
-| **Autonomy & Decision-Making** | Roles attributes speakers; Structuring maps fields; Considerations ranks differentials |
-| **Actions & Tool Use** | AWS Transcribe, Amazon Nova (Bedrock), Exa, **miatec** — real APIs |
-| **Orchestration** | the LangGraph graph in `graph.py` — show state flow |
+| **Agent Overview** | 7 agents + orchestrator, one file each (`backend/app/agents/`) |
+| **Autonomy & Decision-Making** | Roles attributes speakers; Structuring maps fields; **Verifier** self-checks evidence↔note alignment; Considerations ranks differentials |
+| **Actions & Tool Use** | AWS Transcribe (+ clinical vocab), Amazon Nova (Bedrock), Exa, **miatec** — real APIs |
+| **Orchestration** | one `StateGraph` in `graph.py` — native `interrupt()` + checkpointer + **two confidence-driven gates** (roles, verifier) |
 | **Human-in-the-Loop** | `/roles` speaker confirm/swap + `/approve` gate; nothing writes until the doctor approves |
-| **Failure Handling** | low-confidence transcript flags, low-confidence role → review, "no strong evidence found", write-retry |
-| **Demo & Presentation** | the live cockpit (SSE) records well |
+| **Failure Handling** | low-confidence transcript masking, low-confidence role → review, **verifier caution branch**, visible retries, "no strong evidence found", write-gate validation |
+| **Demo & Presentation** | the live cockpit (SSE) — every agent narrates its step + decision; records well |
 
-Failure-handling beats already wired into the live system: low-confidence transcript segments flagged
-for review, a low-confidence **role** assignment routed to the human gate, and Evidence returning
-"no strong evidence found" instead of a hallucinated citation.
+Failure-handling beats already wired into the live system: low-confidence transcript segments masked
+before structuring, a low-confidence **role** assignment routed to the human gate, the **Verifier**
+catching evidence that doesn't support the note (→ Considerations hedge), visible LLM/Exa retries, and
+Evidence returning "no strong evidence found" instead of a hallucinated citation.
 
 ## Deploy
 
