@@ -16,6 +16,10 @@ backend/.venv/
 .mypy_cache/
 .ruff_cache/
 
+# ── transcript cache (HOLDS REAL CONSULTATION PHI — never commit) ──
+.cache/
+backend/.cache/
+
 # ── node / frontend (frontend/ also ships its own .gitignore) ──
 node_modules/
 .next/

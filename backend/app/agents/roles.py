@@ -17,6 +17,7 @@ import asyncio
 
 from app.events import publish
 from app.llm import claude_configured, claude_json
+from app.retry import call_with_retry
 
 AGENT = "roles"
 CONFIDENCE_THRESHOLD = 0.75
@@ -25,7 +26,8 @@ _MAX_TURNS_FOR_LLM = 30
 
 async def run_roles(state: dict) -> dict:
     session_id = state["session_id"]
-    await publish(session_id, {"agent": AGENT, "status": "running"})
+    await publish(session_id, {"agent": AGENT, "status": "running",
+                               "step": "Inferring doctor vs. patient from who takes history vs. reports symptoms…"})
 
     transcript = state.get("transcript", [])
     labels = []
@@ -37,13 +39,17 @@ async def run_roles(state: dict) -> dict:
     roles = None
     if claude_configured() and len(labels) >= 2:
         try:
-            roles = await asyncio.to_thread(_assign_roles_llm, transcript, labels)
-        except Exception as exc:  # noqa: BLE001 — surface, then fall back
-            await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc)})
+            roles = await call_with_retry(session_id, AGENT,
+                                          lambda: _assign_roles_llm(transcript, labels),
+                                          step="role attribution via LLM")
+        except Exception as exc:  # noqa: BLE001 — retries exhausted → fall back to the heuristic
+            await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                       "step": "LLM unavailable — using the positional heuristic"})
     if roles is None:
         roles = _assign_roles_heuristic(labels)
 
     roles["needs_review"] = roles["confidence"] < CONFIDENCE_THRESHOLD
+    degraded = roles.get("source") == "heuristic"
 
     # Apply the resolved roles to the transcript so downstream agents see doctor/patient.
     mapping = roles["mapping"]
@@ -51,8 +57,22 @@ async def run_roles(state: dict) -> dict:
         lbl = seg.get("speaker_label") or seg.get("speaker")
         seg["speaker"] = mapping.get(lbl, seg.get("speaker"))
 
-    await publish(session_id, {"agent": AGENT, "status": "done", "roles": roles})
+    summary, reason = _summarize(roles)
+    await publish(session_id, {"agent": AGENT, "status": "done", "roles": roles,
+                               "summary": summary, "reason": reason, "degraded": degraded})
     return {"transcript": transcript, "roles": roles}
+
+
+def _summarize(roles: dict) -> tuple:
+    """One-line decision + the 'why' the cockpit shows under the agent."""
+    mapping = roles.get("mapping", {})
+    doctor = next((lbl for lbl, r in mapping.items() if r == "doctor"), "?")
+    patient = next((lbl for lbl, r in mapping.items() if r == "patient"), "?")
+    pct = round(roles.get("confidence", 0.0) * 100)
+    tail = " · ⚠ needs review" if roles.get("needs_review") else ""
+    summary = f"{doctor} = doctor, {patient} = patient · {pct}% confident{tail}"
+    reason = roles.get("rationale") or f"assigned via {roles.get('source', 'llm')}"
+    return summary, reason
 
 
 _SYSTEM = (

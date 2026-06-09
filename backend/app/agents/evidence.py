@@ -19,6 +19,7 @@ import os
 from urllib.parse import urlparse
 
 from app.events import publish
+from app.retry import call_with_retry
 
 AGENT = "evidence"
 SCORE_THRESHOLD = 0.35   # only used to filter the canned stub hits
@@ -46,29 +47,40 @@ def exa_configured() -> bool:
 
 async def run_evidence(state: dict) -> dict:
     session_id = state["session_id"]
-    await publish(session_id, {"agent": AGENT, "status": "running"})
-
     note = state.get("note", {})
     query = _build_query(note)
 
-    hits = None
+    step = f"Searching Exa: “{query[:60]}…”" if query else "Searching Exa for relevant guidelines…"
+    await publish(session_id, {"agent": AGENT, "status": "running", "step": step})
+
+    hits, source = None, "exa"
     if exa_configured() and query:
         try:
-            hits = await asyncio.to_thread(_search_exa, query)
-        except Exception as exc:  # noqa: BLE001 — surface, then fall back so the demo survives
-            await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc)})
+            hits = await call_with_retry(session_id, AGENT, lambda: _search_exa(query),
+                                         step="Exa search")
+        except Exception as exc:  # noqa: BLE001 — retries exhausted → fall back so the demo survives
+            await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                       "step": "Exa unavailable — using canned guideline citations"})
 
     if hits is None:  # Exa not configured or errored → canned stub
+        source = "stub"
         await asyncio.sleep(0.7)
         hits = [e for e in _MOCK_EVIDENCE if e["score"] >= SCORE_THRESHOLD]
 
+    degraded = source == "stub"
     if not hits:
         # Honest empty result instead of a hallucinated citation (failure handling).
-        await publish(session_id, {"agent": AGENT, "status": "done", "evidence": [],
-                                   "note": "no strong evidence found"})
+        await publish(session_id, {"agent": AGENT, "status": "done", "evidence": [], "query": query,
+                                   "note": "no strong evidence found", "summary": "no strong evidence found",
+                                   "reason": "returned nothing rather than inventing a citation (failure handling)",
+                                   "degraded": degraded})
         return {"evidence": []}
 
-    await publish(session_id, {"agent": AGENT, "status": "done", "evidence": hits})
+    via = "Exa neural search" if source == "exa" else "canned sources (no Exa key)"
+    summary = f"{len(hits)} evidence source(s) via {via}"
+    reason = f"grounded the query: {query}" if query else "grounded the structured note"
+    await publish(session_id, {"agent": AGENT, "status": "done", "evidence": hits, "query": query,
+                               "summary": summary, "reason": reason, "degraded": degraded})
     return {"evidence": hits}
 
 

@@ -30,6 +30,7 @@ class State(TypedDict, total=False):
     session_id: str
     audio_ref: Optional[str]
     transcript: list
+    quality_score: Optional[float]
     roles: dict
     note: dict
     evidence: list

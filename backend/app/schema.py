@@ -86,6 +86,7 @@ class EncounterState(BaseModel):
     session_id: str
     audio_ref: Optional[str] = None
     transcript: list[TranscriptSegment] = Field(default_factory=list)
+    quality_score: Optional[float] = None   # mean transcript confidence — drives the cockpit signal gauge
     roles: SpeakerRoles = Field(default_factory=SpeakerRoles)
     note: ClinicalNote = Field(default_factory=ClinicalNote)
     evidence: list[Evidence] = Field(default_factory=list)

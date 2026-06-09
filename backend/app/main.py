@@ -8,6 +8,7 @@ which re-derives the note. In-memory session store is intentional — fine for t
 from __future__ import annotations
 
 import json
+import os
 from typing import Optional
 
 from dotenv import find_dotenv, load_dotenv
@@ -65,9 +66,12 @@ async def health() -> dict:
 @app.post("/ingest")
 async def ingest(req: IngestRequest) -> dict:
     """Run Scribe → Roles → Structuring → Evidence → Considerations, then pause at the HITL gate."""
+    # No explicit audio posted → fall back to DEFAULT_AUDIO_REF (the real consult in S3). If that's
+    # also unset, Scribe uses its canned pt-BR sample, so the demo always runs.
+    audio_ref = req.audio_ref or os.getenv("DEFAULT_AUDIO_REF") or None
     initial = {
         "session_id": req.session_id,
-        "audio_ref": req.audio_ref,
+        "audio_ref": audio_ref,
         "approved": False,
     }
     state = await pre_approval_graph.ainvoke(initial)
@@ -146,6 +150,12 @@ async def write(session_id: str) -> dict:
         raise HTTPException(404, "unknown session")
     if not state.get("approved"):
         raise HTTPException(409, "note not approved by clinician")
+
+    # Final safety gate: never write a malformed note into miatec (the irreversible action).
+    try:
+        ClinicalNote(**(state.get("note") or {}))
+    except Exception as exc:  # noqa: BLE001 — surface as a clear client error, don't write
+        raise HTTPException(422, f"approved note failed validation: {exc}")
 
     state = await post_approval_graph.ainvoke(state)
     SESSIONS[session_id] = dict(state)
