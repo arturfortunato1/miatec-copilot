@@ -34,6 +34,17 @@ export type Consideration = {
   dismissed: boolean;
 };
 
+export type EvidenceVerdict = { index: number; stance: string; note: string };
+
+export type Verification = {
+  alignment: number;
+  verdicts: EvidenceVerdict[];
+  concerns: string[];
+  summary: string;
+  needs_caution: boolean;
+  source: string;
+};
+
 export type MiatecWriteResult = {
   encounter_id: string | null;
   status: string;
@@ -55,6 +66,7 @@ export type EncounterState = {
   roles?: SpeakerRoles;
   note: ClinicalNote;
   evidence: Evidence[];
+  verification?: Verification;
   considerations: Consideration[];
   approved: boolean;
   miatec_write_result?: MiatecWriteResult;
@@ -97,5 +109,10 @@ export async function swapRoles(sessionId: string) {
     body: JSON.stringify({ session_id: sessionId, swap: true }),
   });
   if (!res.ok) throw new Error(`roles update failed: ${res.status}`);
-  return (await res.json()) as { roles: SpeakerRoles; note: ClinicalNote; considerations: Consideration[] };
+  return (await res.json()) as {
+    roles: SpeakerRoles;
+    note: ClinicalNote;
+    verification: Verification;
+    considerations: Consideration[];
+  };
 }

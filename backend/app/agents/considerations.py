@@ -32,8 +32,10 @@ _SYSTEM = (
     '0 and 1, "evidence_refs": array of integer indices into the evidence array}. Rank most-to-least '
     "likely. CALIBRATION: confidences must be modest and reflect genuine uncertainty from a single "
     "consultation transcript — rarely above 0.7 for one differential. If quality_context shows low "
-    "role-attribution confidence or many unclear turns, be MORE conservative: lower the confidences and "
-    "prefer rule-out ('descartar') framing. Put ALL reasoning inside the 'rationale' field (pt-BR). "
+    "role-attribution confidence, many unclear turns, or LOW evidence_alignment (the verifier found the "
+    "evidence weakly supports the note), be MORE conservative: lower the confidences, prefer rule-out "
+    "('descartar') framing, and address any listed evidence_concerns. Put ALL reasoning inside the "
+    "'rationale' field (pt-BR). "
     "Output ONLY the JSON array: no prose, no code fences."
 )
 
@@ -81,13 +83,16 @@ async def run_considerations(state: dict) -> dict:
 
 
 def _quality_context(state: dict) -> dict:
-    """Signal the ranker how much to trust its inputs."""
+    """Signal the ranker how much to trust its inputs (roles confidence, transcript noise, verifier)."""
     roles = state.get("roles", {}) or {}
     note = state.get("note", {}) or {}
+    verification = state.get("verification", {}) or {}
     return {
         "role_attribution_confidence": round(float(roles.get("confidence", 0.0)), 2),
         "role_needs_review": bool(roles.get("needs_review", False)),
         "unclear_transcript_turns": len(note.get("low_confidence_segments", []) or []),
+        "evidence_alignment": round(float(verification.get("alignment", 0.0)), 2),
+        "evidence_concerns": (verification.get("concerns") or [])[:3],
     }
 
 

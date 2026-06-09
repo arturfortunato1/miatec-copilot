@@ -13,6 +13,7 @@ import {
   type MiatecWriteResult,
   type SpeakerRoles,
   type TranscriptSegment,
+  type Verification,
 } from "@/lib/api";
 
 type AgentKey =
@@ -20,6 +21,7 @@ type AgentKey =
   | "roles"
   | "structuring"
   | "evidence"
+  | "verifier"
   | "considerations"
   | "human_gate"
   | "record";
@@ -43,6 +45,7 @@ type AgentEvent = {
   roles?: SpeakerRoles;
   note?: ClinicalNote | string;
   evidence?: Evidence[];
+  verification?: Verification;
   considerations?: Consideration[];
   encounter_id?: string | null;
   detail?: string | null;
@@ -56,6 +59,7 @@ const AGENTS: { key: AgentKey; label: string; sub: string }[] = [
   { key: "roles", label: "Roles", sub: "doctor vs. patient" },
   { key: "structuring", label: "Structuring", sub: "transcript → SOAP" },
   { key: "evidence", label: "Evidence", sub: "Exa citations" },
+  { key: "verifier", label: "Verifier", sub: "evidence ↔ note check" },
   { key: "considerations", label: "Considerations", sub: "ranked differentials" },
   { key: "human_gate", label: "Human gate", sub: "doctor approves" },
   { key: "record", label: "Record", sub: "write → miatec" },
@@ -67,6 +71,7 @@ const AGENT_COLOR: Record<AgentKey, { text: string; badge: string; dot: string }
   roles: { text: "text-sky-300", badge: "border-sky-500/30 bg-sky-500/10 text-sky-200", dot: "bg-sky-400" },
   structuring: { text: "text-emerald-300", badge: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200", dot: "bg-emerald-400" },
   evidence: { text: "text-amber-300", badge: "border-amber-500/30 bg-amber-500/10 text-amber-200", dot: "bg-amber-400" },
+  verifier: { text: "text-rose-300", badge: "border-rose-500/30 bg-rose-500/10 text-rose-200", dot: "bg-rose-400" },
   considerations: { text: "text-fuchsia-300", badge: "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-200", dot: "bg-fuchsia-400" },
   human_gate: { text: "text-blue-300", badge: "border-blue-500/30 bg-blue-500/10 text-blue-200", dot: "bg-blue-400" },
   record: { text: "text-teal-300", badge: "border-teal-500/30 bg-teal-500/10 text-teal-200", dot: "bg-teal-400" },
@@ -83,11 +88,11 @@ const STATUS_STYLES: Record<Status, string> = {
 
 const INITIAL_STATUS: Record<AgentKey, Status> = {
   scribe: "idle", roles: "idle", structuring: "idle", evidence: "idle",
-  considerations: "idle", human_gate: "idle", record: "idle",
+  verifier: "idle", considerations: "idle", human_gate: "idle", record: "idle",
 };
 const EMPTY_CAPTIONS: Record<AgentKey, Caption> = {
   scribe: {}, roles: {}, structuring: {}, evidence: {},
-  considerations: {}, human_gate: {}, record: {},
+  verifier: {}, considerations: {}, human_gate: {}, record: {},
 };
 
 export default function Cockpit() {
@@ -101,6 +106,7 @@ export default function Cockpit() {
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [evidenceNote, setEvidenceNote] = useState<string | null>(null);
   const [evidenceQuery, setEvidenceQuery] = useState<string | null>(null);
+  const [verification, setVerification] = useState<Verification | null>(null);
   const [considerations, setConsiderations] = useState<Consideration[]>([]);
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
   const [writeResult, setWriteResult] = useState<MiatecWriteResult | null>(null);
@@ -117,10 +123,10 @@ export default function Cockpit() {
   }
 
   function applyEvent(ev: AgentEvent) {
-    // The graph's conditional low-confidence roles gate emits a non-blocking "review" notice — log it
-    // in the activity feed without disturbing the agent rail.
+    // Non-blocking "review" notices from a conditional gate (low-confidence roles, or the verifier's
+    // caution/reconcile branch) — log to the activity feed without disturbing the agent rail.
     if ((ev.status as string) === "review") {
-      pushActivity(ev.agent, "retry", ev.step ?? "low-confidence roles — flagged for review", ev.reason);
+      pushActivity(ev.agent, "retry", ev.step ?? "flagged for review", ev.reason);
       return;
     }
     setStatuses((s) => ({ ...s, [ev.agent]: ev.status }));
@@ -158,6 +164,7 @@ export default function Cockpit() {
       if (typeof ev.note === "string") setEvidenceNote(ev.note);
       else if (ev.evidence && ev.evidence.length) setEvidenceNote(null);
     }
+    if (ev.agent === "verifier" && ev.verification) setVerification(ev.verification);
     if (ev.agent === "considerations" && ev.considerations) setConsiderations(ev.considerations);
     if (ev.agent === "record" && (ev.status === "done" || ev.status === "error")) {
       setWriteResult({ encounter_id: ev.encounter_id ?? null, status: ev.status === "done" ? "success" : "error", detail: ev.detail ?? null });
@@ -172,6 +179,7 @@ export default function Cockpit() {
         setRoles(state.roles ?? null);
         setNote(state.note);
         setEvidence(state.evidence);
+        setVerification(state.verification ?? null);
         setConsiderations(state.considerations);
         if (typeof state.quality_score === "number") setQualityScore(state.quality_score);
       })
@@ -191,6 +199,7 @@ export default function Cockpit() {
     setEvidence([]);
     setEvidenceNote(null);
     setEvidenceQuery(null);
+    setVerification(null);
     setConsiderations([]);
     setDismissed(new Set());
     setWriteResult(null);
@@ -227,6 +236,7 @@ export default function Cockpit() {
       const res = await swapRoles(sessionId);
       setRoles(res.roles);
       setNote(res.note);
+      setVerification(res.verification);
       setConsiderations(res.considerations);
       pushActivity("roles", "done", "Roles swapped by clinician — note re-derived", "human-in-the-loop correction");
     } catch (e: unknown) {
@@ -465,6 +475,50 @@ export default function Cockpit() {
                     <p className="mt-2 text-xs text-red-300">
                       ⚠ {note.low_confidence_segments.length} low-confidence segment(s) flagged for review (failure handling).
                     </p>
+                  )}
+                </section>
+              )}
+
+              {verification && (
+                <section
+                  className={`rounded-xl border p-4 ${verification.needs_caution ? "border-rose-500/40 bg-rose-500/5" : "border-zinc-800 bg-zinc-900/40"}`}
+                >
+                  <div className="flex flex-wrap items-center gap-3">
+                    <h2 className="text-sm font-semibold text-zinc-300">
+                      Verifier <span className="text-zinc-500">· evidence ↔ note</span>
+                    </h2>
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] ${verification.alignment >= 0.7 ? "bg-emerald-500/15 text-emerald-300" : verification.alignment >= 0.5 ? "bg-amber-500/15 text-amber-300" : "bg-rose-500/15 text-rose-300"}`}
+                    >
+                      {Math.round(verification.alignment * 100)}% aligned
+                    </span>
+                    {verification.needs_caution && (
+                      <span className="text-[11px] text-rose-300">⚠ weak support — considerations hedged</span>
+                    )}
+                    {verification.source === "stub" && (
+                      <span className="rounded bg-amber-500/15 px-1 py-0.5 text-[9px] uppercase text-amber-300">stub</span>
+                    )}
+                  </div>
+                  {verification.summary && <p className="mt-2 text-xs text-zinc-400">{verification.summary}</p>}
+                  {verification.verdicts.length > 0 && (
+                    <div className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                      {verification.verdicts.map((v, i) => (
+                        <span
+                          key={i}
+                          title={v.note}
+                          className={`rounded px-1.5 py-0.5 ${v.stance === "supports" ? "bg-emerald-500/15 text-emerald-300" : v.stance === "contradicts" ? "bg-rose-500/15 text-rose-300" : "bg-zinc-800 text-zinc-400"}`}
+                        >
+                          [{v.index}] {v.stance === "supports" ? "✓" : v.stance === "contradicts" ? "✗" : "•"} {v.stance}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {verification.concerns.length > 0 && (
+                    <ul className="mt-2 space-y-0.5">
+                      {verification.concerns.map((c, i) => (
+                        <li key={i} className="text-[11px] text-rose-300/90">⚠ {c}</li>
+                      ))}
+                    </ul>
                   )}
                 </section>
               )}

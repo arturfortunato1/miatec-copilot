@@ -66,6 +66,23 @@ class Consideration(BaseModel):
     dismissed: bool = False
 
 
+class EvidenceVerdict(BaseModel):
+    """The Verifier's stance on one evidence item relative to the note's assessment."""
+    index: int                          # index into EncounterState.evidence
+    stance: str = "neutral"             # supports | neutral | contradicts
+    note: str = ""                      # one-line why
+
+
+class Verification(BaseModel):
+    """Self-check meta-agent output — does the retrieved evidence support the note's assessment?"""
+    alignment: float = 0.0              # 0..1 overall evidence↔note support
+    verdicts: list[EvidenceVerdict] = Field(default_factory=list)
+    concerns: list[str] = Field(default_factory=list)   # gaps / contradictions to flag
+    summary: str = ""
+    needs_caution: bool = False         # alignment below threshold → Considerations hedges
+    source: str = "llm"                 # llm | stub
+
+
 class MiatecWriteResult(BaseModel):
     encounter_id: Optional[str] = None
     status: str = "pending"            # pending | success | error
@@ -90,6 +107,7 @@ class EncounterState(BaseModel):
     roles: SpeakerRoles = Field(default_factory=SpeakerRoles)
     note: ClinicalNote = Field(default_factory=ClinicalNote)
     evidence: list[Evidence] = Field(default_factory=list)
+    verification: Verification = Field(default_factory=Verification)
     considerations: list[Consideration] = Field(default_factory=list)
     approved: bool = False
     miatec_write_result: MiatecWriteResult = Field(default_factory=MiatecWriteResult)
