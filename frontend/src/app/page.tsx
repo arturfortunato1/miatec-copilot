@@ -116,6 +116,12 @@ export default function Cockpit() {
   }
 
   function applyEvent(ev: AgentEvent) {
+    // The graph's conditional low-confidence roles gate emits a non-blocking "review" notice — log it
+    // in the activity feed without disturbing the agent rail.
+    if ((ev.status as string) === "review") {
+      pushActivity(ev.agent, "retry", ev.step ?? "low-confidence roles — flagged for review", ev.reason);
+      return;
+    }
     setStatuses((s) => ({ ...s, [ev.agent]: ev.status }));
 
     // Per-agent caption: what it's doing now → its decision when done.
