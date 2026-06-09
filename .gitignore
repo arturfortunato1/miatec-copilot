@@ -1,0 +1,33 @@
+# ── secrets / env (keep the *.example templates) ──────────────
+.env
+.env.local
+.env.*.local
+backend/.env
+frontend/.env.local
+
+# ── python / backend ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+backend/.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── node / frontend (frontend/ also ships its own .gitignore) ──
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+.vercel
+
+# ── os / editor ───────────────────────────────────────────────
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.pem

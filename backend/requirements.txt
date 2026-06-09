@@ -1,0 +1,16 @@
+# ── core: makes the skeleton boot & run the full loop (stubbed) ──
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30
+pydantic>=2.7
+sse-starlette>=2.1
+python-dotenv>=1.0
+httpx>=0.27
+langgraph>=0.2.40
+langchain-core>=0.3
+
+# ── integration SDKs: install when you replace the stubbed agents ──
+# (agents import these lazily, so the app boots without them)
+anthropic>=0.40          # Structuring + Considerations  (or Claude via Bedrock/boto3)
+exa-py>=1.8              # Evidence agent
+boto3>=1.34             # AWS Transcribe + S3 (+ Bedrock)
+stripe>=9               # Billing agent (optional)
