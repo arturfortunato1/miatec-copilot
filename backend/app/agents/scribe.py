@@ -34,6 +34,9 @@ from app.vocab import vocabulary_if_ready
 AGENT = "scribe"
 _POLL_TIMEOUT_S = 600  # real consultations run ~10 min; batch transcription needs headroom
 _CACHE_DIR = pathlib.Path(__file__).resolve().parents[2] / ".cache" / "scribe"
+# Visual pacing for the "live capture" effect: seconds between turns as the transcript streams in.
+# A DISPLAY rhythm only (not the audio's real duration); set SCRIBE_STREAM_DELAY=0 to disable.
+_STREAM_DELAY = float(os.getenv("SCRIBE_STREAM_DELAY", "0.2"))
 
 # Canned pt-BR consult so the skeleton runs end-to-end without AWS wired up. Anonymous labels
 # (spk_0/spk_1) just like real diarization — the Roles agent assigns doctor/patient.
@@ -45,6 +48,23 @@ _MOCK_TRANSCRIPT = [
     {"speaker": "spk_1", "text": "Irradia um pouco para o braço esquerdo. Tomo losartana pra pressão.", "confidence": 0.61},
     {"speaker": "spk_0", "text": "Vou pedir um eletrocardiograma e marcadores cardíacos.", "confidence": 0.96},
 ]
+
+
+async def _stream_transcript(session_id: str, segments: list, audio_name: str) -> None:
+    """Publish the transcript progressively — one turn at a time — so the cockpit fills in line-by-line
+    like a live capture. Frames use status "streaming": the UI appends + shows progress, keeps the rail
+    spinning, and doesn't flood the activity feed. Paced by _STREAM_DELAY (a display rhythm, NOT the
+    audio's real time). run_scribe still returns the whole transcript to the next graph node."""
+    if _STREAM_DELAY <= 0 or not segments:
+        return
+    total = len(segments)
+    shown: list = []
+    for seg in segments:
+        shown.append(seg)
+        await publish(session_id, {"agent": AGENT, "status": "streaming", "audio": audio_name,
+                                   "step": f"Transcrevendo a consulta… {len(shown)}/{total} falas",
+                                   "transcript": list(shown)})
+        await asyncio.sleep(_STREAM_DELAY)
 
 
 async def run_scribe(state: dict) -> dict:
@@ -87,6 +107,10 @@ async def run_scribe(state: dict) -> dict:
     quality_score = (round(sum(s.get("confidence", 1.0) for s in segments) / len(segments), 3)
                      if segments else None)
     summary, reason = _summarize(segments, source)
+
+    # Stream the transcript in line-by-line for a "live capture" feel before marking the agent done.
+    await _stream_transcript(session_id, segments, audio_name)
+
     await publish(session_id, {"agent": AGENT, "status": "done", "transcript": segments,
                                "summary": summary, "reason": reason, "source": source, "audio": audio_name,
                                "quality_score": quality_score, "degraded": source == "mock",

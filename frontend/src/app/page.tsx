@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   API_BASE,
   approve,
@@ -116,6 +116,13 @@ export default function Cockpit() {
   const [qualityScore, setQualityScore] = useState<number | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const actId = useRef(0);
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+
+  // Keep the newest line in view as the transcript streams in (live-capture feel).
+  useEffect(() => {
+    const el = transcriptRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [transcript]);
 
   function pushActivity(agent: AgentKey, kind: Status, text: string, reason?: string) {
     const time = new Date().toLocaleTimeString();
@@ -127,6 +134,14 @@ export default function Cockpit() {
     // caution/reconcile branch) — log to the activity feed without disturbing the agent rail.
     if ((ev.status as string) === "review") {
       pushActivity(ev.agent, "retry", ev.step ?? "flagged for review", ev.reason);
+      return;
+    }
+    // Scribe streaming the transcript in line-by-line (live-capture effect): append the growing
+    // transcript + show progress, keep the rail spinning, don't flood the activity feed.
+    if ((ev.status as string) === "streaming") {
+      if (ev.transcript) setTranscript(ev.transcript);
+      setStatuses((s) => ({ ...s, [ev.agent]: "running" }));
+      setCaptions((c) => ({ ...c, [ev.agent]: { line: ev.step ?? "Transcrevendo…", done: false } }));
       return;
     }
     setStatuses((s) => ({ ...s, [ev.agent]: ev.status }));
@@ -437,7 +452,7 @@ export default function Cockpit() {
                   {transcript.length > 0 && <span className="text-[11px] text-zinc-500">{transcript.length} turns</span>}
                   {qualityScore != null && <span className="ml-auto"><QualityGauge score={qualityScore} /></span>}
                 </div>
-                <div className="max-h-96 divide-y divide-zinc-800 overflow-auto rounded-xl border border-zinc-800 bg-zinc-900/40">
+                <div ref={transcriptRef} className="max-h-96 divide-y divide-zinc-800 overflow-auto rounded-xl border border-zinc-800 bg-zinc-900/40">
                   {transcript.length === 0 && <p className="p-4 text-sm text-zinc-600">listening…</p>}
                   {transcript.map((seg, i) => {
                     const low = seg.confidence < 0.7;
