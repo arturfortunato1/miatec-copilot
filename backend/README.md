@@ -23,7 +23,7 @@ Open http://localhost:8000/docs for the interactive OpenAPI UI.
 | GET | `/stream/{session}` | SSE — agents lighting up live (feed the cockpit) |
 | GET | `/state/{session}` | Current encounter state (note, evidence, considerations) |
 | POST | `/approve` | Doctor's edited + approved note (+ dismissed considerations); returns a miatec **dry-run preview** |
-| POST | `/write/{session}` | Record agent writes into miatec, then optional Billing |
+| POST | `/write/{session}` | Record agent writes the approved note into miatec |
 
 ## Where to plug real APIs
 
@@ -36,7 +36,6 @@ Every agent ships a runnable stub returning canned pt-BR data. Search **`TODO(re
 | `app/agents/evidence.py` | Exa search + contents |
 | `app/agents/considerations.py` | Claude reasoning over note + evidence |
 | `app/agents/record.py` | miatec REST (idempotency key + retry) |
-| `app/agents/billing.py` | Stripe (optional) |
 
 `app/graph.py` is the orchestration artifact — screenshot it for the slide. `app/schema.py` is the
 typed contract every agent reads/writes.

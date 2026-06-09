@@ -1,8 +1,10 @@
-"""Record agent — approved note → written into miatec (REST). THE MOAT.
+"""Record agent — approved note → into miatec. THE MOAT.
 
-Real: map ClinicalNote → miatec encounter/prontuário schema; POST with an Idempotency-Key; store the
-returned encounter_id. Retry on 5xx/timeout and surface a clear error to the HITL UI on final
-failure — this retry loop is a ready-made Failure-Handling beat. Scores under: Actions & Tool Use.
+Integration decision (see docs/INTEGRATIONS.md): for now the approved encounter is entered into
+miatec through the miatec app's own frontend — so this agent MAPS the ClinicalNote to the miatec
+encounter shape and marks it ready for entry. The direct REST write (with Idempotency-Key + retry,
+scaffolded below) is a later enhancement; the retry loop stays as a ready-made Failure-Handling beat.
+Scores under: Actions & Tool Use.
 """
 from __future__ import annotations
 

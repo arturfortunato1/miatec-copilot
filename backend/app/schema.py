@@ -22,9 +22,10 @@ class AgentStatus(str, Enum):
 
 
 class TranscriptSegment(BaseModel):
-    speaker: str                       # "doctor" | "patient" | "unknown"
+    speaker: str                         # resolved role: "doctor" | "patient" | raw label (pre-Roles)
+    speaker_label: Optional[str] = None  # raw diarization label from Transcribe (spk_0 / spk_1)
     text: str
-    confidence: float = 1.0            # drives failure handling (low-confidence flags)
+    confidence: float = 1.0              # drives failure handling (low-confidence flags)
     start: Optional[float] = None
     end: Optional[float] = None
 
@@ -71,10 +72,13 @@ class MiatecWriteResult(BaseModel):
     detail: Optional[str] = None
 
 
-class Invoice(BaseModel):
-    invoice_id: Optional[str] = None
-    amount_cents: Optional[int] = None
-    status: str = "pending"
+class SpeakerRoles(BaseModel):
+    """Maps raw diarization labels (spk_0/spk_1) → clinical roles, with assertiveness signals."""
+    mapping: dict[str, str] = Field(default_factory=dict)   # raw label -> "doctor" | "patient" | "unknown"
+    confidence: float = 0.0
+    rationale: str = ""
+    source: str = "llm"               # llm | heuristic | manual | channel
+    needs_review: bool = False        # confidence below threshold -> HITL confirm/swap
 
 
 class EncounterState(BaseModel):
@@ -82,11 +86,10 @@ class EncounterState(BaseModel):
     session_id: str
     audio_ref: Optional[str] = None
     transcript: list[TranscriptSegment] = Field(default_factory=list)
+    roles: SpeakerRoles = Field(default_factory=SpeakerRoles)
     note: ClinicalNote = Field(default_factory=ClinicalNote)
     evidence: list[Evidence] = Field(default_factory=list)
     considerations: list[Consideration] = Field(default_factory=list)
     approved: bool = False
-    enable_billing: bool = False
     miatec_write_result: MiatecWriteResult = Field(default_factory=MiatecWriteResult)
-    invoice: Optional[Invoice] = None
     errors: list[str] = Field(default_factory=list)

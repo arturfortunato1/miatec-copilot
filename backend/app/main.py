@@ -2,24 +2,28 @@
 
 The human-in-the-loop gate lives here: /ingest runs the agents up to the pause, the frontend renders
 the note/evidence/considerations, the doctor edits + approves via /approve, and only then does
-/write run the Record agent into miatec. In-memory session store is intentional — fine for the demo.
+/write run the Record agent into miatec. /roles lets the doctor confirm/swap speaker attribution,
+which re-derives the note. In-memory session store is intentional — fine for the demo.
 """
 from __future__ import annotations
 
 import json
 from typing import Optional
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app.agents.considerations import run_considerations
+from app.agents.evidence import run_evidence
+from app.agents.structuring import run_structuring
 from app.events import publish, subscribe, unsubscribe
 from app.graph import post_approval_graph, pre_approval_graph
 from app.schema import ClinicalNote
 
-load_dotenv()
+load_dotenv(find_dotenv(usecwd=True))  # walks up from cwd → finds repo-root .env
 
 app = FastAPI(title="miatec-copilot", version="0.1.0",
               description="Agentic clinical scribe → miatec write-back, with a human approval gate.")
@@ -39,13 +43,18 @@ SESSIONS: dict[str, dict] = {}
 class IngestRequest(BaseModel):
     session_id: str
     audio_ref: Optional[str] = None
-    enable_billing: bool = False
 
 
 class ApproveRequest(BaseModel):
     session_id: str
     note: ClinicalNote
     dismissed_considerations: list[int] = []
+
+
+class RolesUpdate(BaseModel):
+    session_id: str
+    swap: bool = False                       # flip doctor <-> patient
+    mapping: Optional[dict] = None           # or set an explicit raw-label -> role mapping
 
 
 @app.get("/health")
@@ -55,11 +64,10 @@ async def health() -> dict:
 
 @app.post("/ingest")
 async def ingest(req: IngestRequest) -> dict:
-    """Run Scribe → Structuring → Evidence → Considerations, then pause at the HITL gate."""
+    """Run Scribe → Roles → Structuring → Evidence → Considerations, then pause at the HITL gate."""
     initial = {
         "session_id": req.session_id,
         "audio_ref": req.audio_ref,
-        "enable_billing": req.enable_billing,
         "approved": False,
     }
     state = await pre_approval_graph.ainvoke(initial)
@@ -74,6 +82,38 @@ async def get_state(session_id: str) -> dict:
     if state is None:
         raise HTTPException(404, "unknown session")
     return state
+
+
+@app.post("/roles")
+async def update_roles(req: RolesUpdate) -> dict:
+    """Human-in-the-loop speaker correction: swap or set doctor/patient, then re-derive the note."""
+    state = SESSIONS.get(req.session_id)
+    if state is None:
+        raise HTTPException(404, "unknown session")
+
+    roles = state.get("roles", {}) or {}
+    mapping = dict(roles.get("mapping", {}))
+    if req.mapping:
+        mapping = req.mapping
+    elif req.swap:
+        flip = {"doctor": "patient", "patient": "doctor"}
+        mapping = {label: flip.get(role, role) for label, role in mapping.items()}
+
+    for seg in state.get("transcript", []):
+        label = seg.get("speaker_label") or seg.get("speaker")
+        if label in mapping:
+            seg["speaker"] = mapping[label]
+
+    roles.update({"mapping": mapping, "source": "manual", "confidence": 1.0, "needs_review": False})
+    state["roles"] = roles
+    await publish(req.session_id, {"agent": "roles", "status": "done", "roles": roles})
+
+    # Roles changed → re-derive the note + considerations from the corrected transcript.
+    state.update(await run_structuring(state))
+    state.update(await run_evidence(state))
+    state.update(await run_considerations(state))
+    SESSIONS[req.session_id] = state
+    return {"roles": roles, "note": state["note"], "considerations": state["considerations"]}
 
 
 @app.post("/approve")
@@ -100,7 +140,7 @@ async def approve(req: ApproveRequest) -> dict:
 
 @app.post("/write/{session_id}")
 async def write(session_id: str) -> dict:
-    """Record agent writes the approved note into miatec (then optional Billing)."""
+    """Record agent writes the approved note into miatec."""
     state = SESSIONS.get(session_id)
     if state is None:
         raise HTTPException(404, "unknown session")

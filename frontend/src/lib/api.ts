@@ -40,9 +40,18 @@ export type MiatecWriteResult = {
   detail?: string | null;
 };
 
+export type SpeakerRoles = {
+  mapping: Record<string, string>;   // raw label -> "doctor" | "patient" | "unknown"
+  confidence: number;
+  rationale: string;
+  source: string;
+  needs_review: boolean;
+};
+
 export type EncounterState = {
   session_id: string;
   transcript: TranscriptSegment[];
+  roles?: SpeakerRoles;
   note: ClinicalNote;
   evidence: Evidence[];
   considerations: Consideration[];
@@ -51,11 +60,11 @@ export type EncounterState = {
 };
 
 /** Run Scribe → Structuring → Evidence → Considerations, pausing at the HITL gate. */
-export async function ingest(sessionId: string, opts?: { enableBilling?: boolean }) {
+export async function ingest(sessionId: string) {
   const res = await fetch(`${API_BASE}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: sessionId, enable_billing: opts?.enableBilling ?? false }),
+    body: JSON.stringify({ session_id: sessionId }),
   });
   if (!res.ok) throw new Error(`ingest failed: ${res.status}`);
   return (await res.json()) as EncounterState;
@@ -72,9 +81,20 @@ export async function approve(sessionId: string, note: ClinicalNote, dismissed: 
   return await res.json();
 }
 
-/** Record agent writes the approved note into miatec (then optional Billing). */
+/** Record agent writes the approved note into miatec. */
 export async function writeToMiatec(sessionId: string) {
   const res = await fetch(`${API_BASE}/write/${sessionId}`, { method: "POST" });
   if (!res.ok) throw new Error(`write failed: ${res.status}`);
   return (await res.json()) as EncounterState;
+}
+
+/** HITL speaker correction: swap doctor↔patient; the backend re-derives the note + considerations. */
+export async function swapRoles(sessionId: string) {
+  const res = await fetch(`${API_BASE}/roles`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, swap: true }),
+  });
+  if (!res.ok) throw new Error(`roles update failed: ${res.status}`);
+  return (await res.json()) as { roles: SpeakerRoles; note: ClinicalNote; considerations: Consideration[] };
 }

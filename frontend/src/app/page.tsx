@@ -5,22 +5,24 @@ import {
   API_BASE,
   approve,
   ingest,
+  swapRoles,
   writeToMiatec,
   type ClinicalNote,
   type Consideration,
   type Evidence,
   type MiatecWriteResult,
+  type SpeakerRoles,
   type TranscriptSegment,
 } from "@/lib/api";
 
 type AgentKey =
   | "scribe"
+  | "roles"
   | "structuring"
   | "evidence"
   | "considerations"
   | "human_gate"
-  | "record"
-  | "billing";
+  | "record";
 
 type Status = "idle" | "running" | "done" | "waiting" | "retry" | "error";
 
@@ -28,6 +30,7 @@ type AgentEvent = {
   agent: AgentKey;
   status: Status;
   transcript?: TranscriptSegment[];
+  roles?: SpeakerRoles;
   note?: ClinicalNote | string;
   evidence?: Evidence[];
   considerations?: Consideration[];
@@ -37,12 +40,12 @@ type AgentEvent = {
 
 const AGENTS: { key: AgentKey; label: string; sub: string }[] = [
   { key: "scribe", label: "Scribe", sub: "audio → transcript" },
+  { key: "roles", label: "Roles", sub: "doctor vs patient" },
   { key: "structuring", label: "Structuring", sub: "transcript → SOAP" },
   { key: "evidence", label: "Evidence", sub: "Exa citations" },
   { key: "considerations", label: "Considerations", sub: "ranked differentials" },
   { key: "human_gate", label: "Human gate", sub: "doctor approves" },
   { key: "record", label: "Record", sub: "write → miatec" },
-  { key: "billing", label: "Billing", sub: "Stripe (optional)" },
 ];
 
 const STATUS_STYLES: Record<Status, string> = {
@@ -56,18 +59,19 @@ const STATUS_STYLES: Record<Status, string> = {
 
 const INITIAL_STATUS: Record<AgentKey, Status> = {
   scribe: "idle",
+  roles: "idle",
   structuring: "idle",
   evidence: "idle",
   considerations: "idle",
   human_gate: "idle",
   record: "idle",
-  billing: "idle",
 };
 
 export default function Cockpit() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<AgentKey, Status>>(INITIAL_STATUS);
   const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
+  const [roles, setRoles] = useState<SpeakerRoles | null>(null);
   const [note, setNote] = useState<ClinicalNote | null>(null);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [evidenceNote, setEvidenceNote] = useState<string | null>(null);
@@ -88,6 +92,7 @@ export default function Cockpit() {
     pushLog(`${ev.agent} → ${ev.status}`);
 
     if (ev.agent === "scribe" && ev.transcript) setTranscript(ev.transcript);
+    if (ev.agent === "roles" && ev.roles) setRoles(ev.roles);
     if (ev.agent === "structuring" && ev.note && typeof ev.note !== "string") setNote(ev.note);
     if (ev.agent === "evidence") {
       if (ev.evidence) setEvidence(ev.evidence);
@@ -104,6 +109,7 @@ export default function Cockpit() {
       .then((state) => {
         // Backstop the live SSE updates so panels are populated even if a frame was missed.
         setTranscript(state.transcript);
+        setRoles(state.roles ?? null);
         setNote(state.note);
         setEvidence(state.evidence);
         setConsiderations(state.considerations);
@@ -117,6 +123,7 @@ export default function Cockpit() {
     setSessionId(id);
     setStatuses(INITIAL_STATUS);
     setTranscript([]);
+    setRoles(null);
     setNote(null);
     setEvidence([]);
     setEvidenceNote(null);
@@ -146,6 +153,22 @@ export default function Cockpit() {
       else next.add(i);
       return next;
     });
+  }
+
+  async function onSwapRoles() {
+    if (!sessionId) return;
+    setBusy(true);
+    try {
+      const res = await swapRoles(sessionId);
+      setRoles(res.roles);
+      setNote(res.note);
+      setConsiderations(res.considerations);
+      pushLog("roles swapped → note re-derived");
+    } catch (e: unknown) {
+      pushLog(`roles swap error: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function onApproveAndWrite() {
@@ -224,6 +247,39 @@ export default function Cockpit() {
 
           {started && (
             <>
+              {roles && (
+                <section
+                  className={`rounded-xl border p-4 ${roles.needs_review ? "border-amber-500/40 bg-amber-500/5" : "border-zinc-800 bg-zinc-900/40"}`}
+                >
+                  <div className="flex flex-wrap items-center gap-3">
+                    <h2 className="text-sm font-semibold text-zinc-300">Speaker roles</h2>
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] ${roles.needs_review ? "bg-amber-500/15 text-amber-300" : "bg-emerald-500/15 text-emerald-300"}`}
+                    >
+                      {Math.round(roles.confidence * 100)}% confidence
+                    </span>
+                    {roles.needs_review && (
+                      <span className="text-[11px] text-amber-300">⚠ low confidence — please confirm</span>
+                    )}
+                    <button
+                      onClick={onSwapRoles}
+                      disabled={busy}
+                      className="ml-auto rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 transition-colors hover:bg-zinc-800 disabled:opacity-40"
+                    >
+                      Swap doctor ↔ patient
+                    </button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                    {Object.entries(roles.mapping).map(([label, role]) => (
+                      <span key={label} className="rounded bg-zinc-800 px-2 py-1 text-zinc-300">
+                        {label} → <span className={role === "doctor" ? "text-sky-400" : "text-zinc-100"}>{role}</span>
+                      </span>
+                    ))}
+                  </div>
+                  {roles.rationale && <p className="mt-2 text-xs text-zinc-500">{roles.rationale}</p>}
+                </section>
+              )}
+
               <section>
                 <h2 className="mb-2 text-sm font-semibold text-zinc-300">Transcript</h2>
                 <div className="divide-y divide-zinc-800 rounded-xl border border-zinc-800 bg-zinc-900/40">
