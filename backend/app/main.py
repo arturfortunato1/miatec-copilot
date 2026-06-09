@@ -13,6 +13,7 @@ forwards, so the cockpit animates the same graph live.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Optional
@@ -78,16 +79,41 @@ async def health() -> dict:
     return {"ok": True, "service": "miatec-copilot"}
 
 
+_bg_tasks: set = set()  # hold references to detached graph runs so they aren't garbage-collected
+
+
+async def _run_to_interrupt(session_id: str, audio_ref: Optional[str]) -> None:
+    """Run the graph to the approval interrupt as a BACKGROUND task (publishes progress over SSE).
+
+    Detached from the HTTP request on purpose: a full run (Transcribe + LLM calls + Exa) can take
+    minutes, which exceeds an HTTP proxy's response timeout (e.g. CloudFront caps origin responses at
+    60s, then cancels the handler). Running it here means /ingest returns instantly while the cockpit
+    follows live via /stream; the graph still checkpoints (MemorySaver) so /approve and /write work.
+    """
+    initial = {"session_id": session_id, "audio_ref": audio_ref, "approved": False}
+    try:
+        await encounter_graph.ainvoke(initial, _cfg(session_id))  # pauses before record
+        await publish(session_id, {"agent": "human_gate", "status": "waiting"})
+    except Exception as exc:  # noqa: BLE001 — surface over SSE; never let a detached task die silently
+        await publish(session_id, {"agent": "scribe", "status": "error",
+                                   "step": "pipeline failed", "error": str(exc)})
+
+
 @app.post("/ingest")
 async def ingest(req: IngestRequest) -> dict:
-    """Run the graph (Scribe → Roles → Structuring → Evidence → Verifier → Considerations) to the interrupt."""
+    """Kick off the graph (Scribe → Roles → Structuring → Evidence → Verifier → Considerations) and
+    return IMMEDIATELY; the cockpit watches progress on /stream. Non-blocking so a long run never trips
+    a proxy timeout (CloudFront's 60s origin cap). The graph checkpoints, so /approve + /write follow."""
     # No explicit audio posted → fall back to DEFAULT_AUDIO_REF (the real consult in S3). If that's
     # also unset, Scribe uses its canned pt-BR sample, so the demo always runs.
     audio_ref = req.audio_ref or os.getenv("DEFAULT_AUDIO_REF") or None
-    initial = {"session_id": req.session_id, "audio_ref": audio_ref, "approved": False}
-    state = await encounter_graph.ainvoke(initial, _cfg(req.session_id))  # pauses before record
-    await publish(req.session_id, {"agent": "human_gate", "status": "waiting"})
-    return state
+    task = asyncio.create_task(_run_to_interrupt(req.session_id, audio_ref))
+    _bg_tasks.add(task)
+    task.add_done_callback(_bg_tasks.discard)
+    # Immediate, valid (empty) EncounterState: the cockpit's backstop populates safely and the live
+    # data streams in over SSE as each agent runs.
+    return {"session_id": req.session_id, "audio_ref": audio_ref, "transcript": [], "roles": None,
+            "note": None, "evidence": [], "considerations": [], "approved": False, "quality_score": None}
 
 
 @app.get("/state/{session_id}")
@@ -198,4 +224,7 @@ async def stream(session_id: str) -> EventSourceResponse:
         finally:
             unsubscribe(session_id, q)
 
-    return EventSourceResponse(gen())
+    # ping=15 → a ": ping" comment every 15s, so a load balancer / tunnel never sees the long
+    # Transcribe hold (~minutes) as an idle connection and drop the stream mid-demo. (sse-starlette
+    # already defaults to 15s; we pin it so the heartbeat is explicit and version-proof.)
+    return EventSourceResponse(gen(), ping=15)

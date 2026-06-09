@@ -1,0 +1,14 @@
+# keep the image small and never ship secrets or PHI
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.env
+.env.*
+*.log
+.DS_Store
+README.md

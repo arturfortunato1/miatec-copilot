@@ -11,10 +11,19 @@ from functools import lru_cache
 
 
 def aws_configured() -> bool:
-    """True if some AWS credential source is present."""
+    """True if some AWS credential source is present.
+
+    Covers static env keys, a named profile, ~/.aws — AND the container/instance role case (ECS
+    Fargate task role, EKS, or EC2 instance profile), where boto3 auto-resolves rotating creds from
+    the container-credentials endpoint or IMDS and there are NO static keys or ~/.aws on disk. Without
+    this last check the agents silently fall back to their stubs when deployed on Fargate.
+    """
     if os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY"):
         return True
     if os.getenv("AWS_PROFILE"):
+        return True
+    # ECS/Fargate or EKS task role → creds come from the container credentials endpoint.
+    if os.getenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI") or os.getenv("AWS_CONTAINER_CREDENTIALS_FULL_URI"):
         return True
     return os.path.exists(os.path.expanduser("~/.aws/credentials"))
 
