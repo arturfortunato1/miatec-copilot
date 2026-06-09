@@ -5,14 +5,22 @@ for a recorded demo (vs streaming). Audio must live in S3 — a local path is up
 segment carries averaged confidence (drives failure-handling flags) and its RAW diarization label
 (spk_0 / spk_1); the downstream Roles agent assigns doctor/patient. Scores under: Actions & Tool Use.
 
+The agent narrates itself as it works (publishes a `step` for each phase: locate → start job → poll
+with elapsed time → parse), so the cockpit can show the long batch job progressing live instead of a
+frozen spinner. On success it caches the parsed transcript per audio_ref under backend/.cache so
+repeat demos are instant and survive the temporary workshop creds expiring (SCRIBE_CACHE=0 disables).
+
 Falls back to a canned pt-BR transcript when AWS isn't configured or no `audio_ref` is supplied, so
 the loop always runs. Pass audio via POST /ingest {"audio_ref": "s3://bucket/clip.m4a"} (or a local
-path, which gets uploaded to S3_AUDIO_BUCKET).
+path, which gets uploaded to S3_AUDIO_BUCKET); with no ref it uses DEFAULT_AUDIO_REF.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
+import pathlib
 import time
 import uuid
 
@@ -21,9 +29,11 @@ import httpx
 from app.aws import aws_configured, client
 from app.events import publish
 from app.schema import TranscriptSegment
+from app.vocab import vocabulary_if_ready
 
 AGENT = "scribe"
 _POLL_TIMEOUT_S = 600  # real consultations run ~10 min; batch transcription needs headroom
+_CACHE_DIR = pathlib.Path(__file__).resolve().parents[2] / ".cache" / "scribe"
 
 # Canned pt-BR consult so the skeleton runs end-to-end without AWS wired up. Anonymous labels
 # (spk_0/spk_1) just like real diarization — the Roles agent assigns doctor/patient.
@@ -39,18 +49,34 @@ _MOCK_TRANSCRIPT = [
 
 async def run_scribe(state: dict) -> dict:
     session_id = state["session_id"]
-    await publish(session_id, {"agent": AGENT, "status": "running"})
-
     audio_ref = state.get("audio_ref")
-    segments = None
+    audio_name = os.path.basename(audio_ref) if audio_ref else "sample-consult"
+
+    await publish(session_id, {"agent": AGENT, "status": "running",
+                               "step": f"Preparing to transcribe {audio_name}…", "audio": audio_name})
+
+    segments, source, vocab = None, "mock", None
     if audio_ref and aws_configured():
-        try:
-            # Transcribe is blocking + slow; run it off the event loop.
-            segments = await asyncio.to_thread(_transcribe_batch, audio_ref)
-        except Exception as exc:  # noqa: BLE001 — surface, then fall back so the demo survives
-            await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc)})
+        vocab = await asyncio.to_thread(vocabulary_if_ready)  # pt-BR clinical lexicon, if provisioned
+        cached = _load_cache(audio_ref, vocab)
+        if cached is not None:
+            segments, source = cached, "cache"
+            await publish(session_id, {"agent": AGENT, "status": "running",
+                                       "step": f"Loaded cached transcript ({len(segments)} turns) — skipping re-transcription"})
+        else:
+            try:
+                segments = await _transcribe_live(session_id, audio_ref, vocab)
+                source = "s3"
+                _save_cache(audio_ref, vocab, segments)
+            except Exception as exc:  # noqa: BLE001 — surface, then fall back so the demo survives
+                await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                           "step": "Transcribe failed — falling back to the sample transcript"})
+                segments = None
 
     if not segments:
+        source = "mock"
+        await publish(session_id, {"agent": AGENT, "status": "running",
+                                   "step": "No audio/credentials — using the canned pt-BR consult"})
         await asyncio.sleep(0.5)  # simulate latency for the stub path
         segments = [
             TranscriptSegment(speaker=s["speaker"], speaker_label=s["speaker"],
@@ -58,39 +84,104 @@ async def run_scribe(state: dict) -> dict:
             for s in _MOCK_TRANSCRIPT
         ]
 
-    await publish(session_id, {"agent": AGENT, "status": "done", "transcript": segments})
-    return {"transcript": segments}
+    quality_score = (round(sum(s.get("confidence", 1.0) for s in segments) / len(segments), 3)
+                     if segments else None)
+    summary, reason = _summarize(segments, source)
+    await publish(session_id, {"agent": AGENT, "status": "done", "transcript": segments,
+                               "summary": summary, "reason": reason, "source": source, "audio": audio_name,
+                               "quality_score": quality_score, "degraded": source == "mock",
+                               "vocabulary": bool(vocab)})
+    return {"transcript": segments, "quality_score": quality_score}
 
 
-def _transcribe_batch(audio_ref: str) -> list:
-    """Start an AWS Transcribe pt-BR batch job with diarization, poll it, parse the result."""
-    s3_uri = _ensure_in_s3(audio_ref)
+def _summarize(segments: list, source: str) -> tuple:
+    """One-line decision + the 'why' the cockpit shows under the agent."""
+    n = len(segments)
+    speakers = {s.get("speaker_label") or s.get("speaker") for s in segments}
+    avg = round(100 * sum(s.get("confidence", 1.0) for s in segments) / n) if n else 0
+    low = [s for s in segments if s.get("confidence", 1.0) < 0.7]
+    origin = {"s3": "real audio", "cache": "real audio (cached)", "mock": "sample"}.get(source, source)
+    summary = f"{n} turns · {len(speakers)} speakers · {avg}% avg confidence · {origin}"
+    reason = (f"{len(low)} turn(s) below 70% flagged for review (failure handling)"
+              if low else "every turn above the confidence threshold")
+    return summary, reason
+
+
+async def _transcribe_live(session_id: str, audio_ref: str, vocab=None) -> list:
+    """Start an AWS Transcribe pt-BR batch job with diarization, poll it (narrating progress), parse."""
+    await publish(session_id, {"agent": AGENT, "status": "running", "step": "Locating audio in S3…"})
+    s3_uri = await asyncio.to_thread(_ensure_in_s3, audio_ref)
+
     job_name = f"miatec-scribe-{uuid.uuid4().hex[:12]}"
+    vstep = " + pt-BR clinical vocabulary" if vocab else ""
+    await publish(session_id, {"agent": AGENT, "status": "running",
+                               "step": f"Starting AWS Transcribe job (pt-BR, speaker diarization{vstep})…"})
+    await asyncio.to_thread(_start_job, job_name, s3_uri, vocab)
 
-    tc = client("transcribe")
-    tc.start_transcription_job(
-        TranscriptionJobName=job_name,
-        LanguageCode="pt-BR",
-        Media={"MediaFileUri": s3_uri},  # MediaFormat omitted → Transcribe auto-detects (m4a, mp3, wav, …)
-        Settings={"ShowSpeakerLabels": True, "MaxSpeakerLabels": 2},
-    )
-
-    deadline = time.monotonic() + _POLL_TIMEOUT_S
+    start = time.monotonic()
     while True:
-        job = tc.get_transcription_job(TranscriptionJobName=job_name)["TranscriptionJob"]
+        job = await asyncio.to_thread(_get_job, job_name)
         status = job["TranscriptionJobStatus"]
+        elapsed = int(time.monotonic() - start)
         if status in ("COMPLETED", "FAILED"):
             break
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"transcription job {job_name} timed out")
-        time.sleep(2)
+        if elapsed > _POLL_TIMEOUT_S:
+            raise TimeoutError(f"transcription job {job_name} timed out after {elapsed}s")
+        await publish(session_id, {"agent": AGENT, "status": "running",
+                                   "step": f"Transcribing on AWS… {elapsed}s elapsed (job {status.lower()})"})
+        await asyncio.sleep(3)
 
     if status == "FAILED":
         raise RuntimeError(job.get("FailureReason", "transcription failed"))
 
+    await publish(session_id, {"agent": AGENT, "status": "running", "step": "Parsing diarized transcript…"})
     transcript_url = job["Transcript"]["TranscriptFileUri"]
-    data = httpx.get(transcript_url, timeout=30).json()
+    data = await asyncio.to_thread(lambda: httpx.get(transcript_url, timeout=30).json())
     return _parse_transcript(data)
+
+
+def _start_job(job_name: str, s3_uri: str, vocab=None) -> None:
+    settings = {"ShowSpeakerLabels": True, "MaxSpeakerLabels": 2}
+    if vocab:
+        settings["VocabularyName"] = vocab   # bias recognition toward the pt-BR clinical lexicon
+    client("transcribe").start_transcription_job(
+        TranscriptionJobName=job_name,
+        LanguageCode="pt-BR",
+        Media={"MediaFileUri": s3_uri},  # MediaFormat omitted → Transcribe auto-detects (m4a, mp3, wav, …)
+        Settings=settings,
+    )
+
+
+def _get_job(job_name: str) -> dict:
+    return client("transcribe").get_transcription_job(TranscriptionJobName=job_name)["TranscriptionJob"]
+
+
+# ── transcript cache (per audio_ref) ──────────────────────────────────────────
+def _cache_path(audio_ref: str, vocab=None) -> pathlib.Path:
+    digest = hashlib.sha1(f"{audio_ref}|vocab={vocab or ''}".encode("utf-8")).hexdigest()[:16]
+    return _CACHE_DIR / f"{digest}.json"
+
+
+def _load_cache(audio_ref: str, vocab=None):
+    if os.getenv("SCRIBE_CACHE", "1") == "0":
+        return None
+    path = _cache_path(audio_ref, vocab)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a corrupt cache should never break the run
+        return None
+
+
+def _save_cache(audio_ref: str, vocab, segments: list) -> None:
+    if os.getenv("SCRIBE_CACHE", "1") == "0":
+        return
+    try:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cache_path(audio_ref, vocab).write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001 — caching is best-effort
+        pass
 
 
 def _ensure_in_s3(audio_ref: str) -> str:

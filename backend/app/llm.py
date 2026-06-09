@@ -39,9 +39,14 @@ def claude_messages(system: str, messages: list, max_tokens: int = 1024, tempera
     return _via_bedrock(system, messages, max_tokens, temperature)
 
 
-def claude_json(system: str, user: str, max_tokens: int = 1500) -> Any:
-    """Ask the LLM for strict JSON, strip any code fences, parse and return it (dict or list)."""
-    text = claude_messages(system, [{"role": "user", "content": user}], max_tokens=max_tokens).strip()
+def claude_json(system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> Any:
+    """Ask the LLM for strict JSON, strip any code fences, parse and return it (dict or list).
+
+    `temperature` is threaded through so callers can pin it (e.g. Considerations uses 0 to cut Nova's
+    run-to-run ranking variance).
+    """
+    text = claude_messages(system, [{"role": "user", "content": user}],
+                           max_tokens=max_tokens, temperature=temperature).strip()
     if text.startswith("```"):
         text = text.strip("`")
         if text.lower().startswith("json"):

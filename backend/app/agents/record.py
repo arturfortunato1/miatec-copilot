@@ -18,7 +18,8 @@ MAX_RETRIES = 3
 
 async def run_record(state: dict) -> dict:
     session_id = state["session_id"]
-    await publish(session_id, {"agent": AGENT, "status": "running"})
+    await publish(session_id, {"agent": AGENT, "status": "running",
+                               "step": "Mapping the approved note into the miatec encounter shape…"})
 
     note = state.get("note", {})
     idempotency_key = f"{session_id}:record"
@@ -37,7 +38,12 @@ async def run_record(state: dict) -> dict:
                 "detail": f"written on attempt {attempt}",
                 "idempotency_key": idempotency_key,
             }
-            await publish(session_id, {"agent": AGENT, "status": "done", **result})
+            # NB: keep the event's lifecycle status ("done") distinct from the write-result status
+            # ("success") — don't spread **result here or it clobbers status and the cockpit drops the frame.
+            await publish(session_id, {"agent": AGENT, "status": "done",
+                                       "encounter_id": encounter_id, "detail": result["detail"],
+                                       "summary": f"Encounter written to miatec · {encounter_id}",
+                                       "reason": f"idempotency-keyed write, succeeded on attempt {attempt}"})
             return {"miatec_write_result": result}
         except Exception as exc:  # noqa: BLE001 — surface, retry, then fail loudly
             last_err = str(exc)
@@ -46,5 +52,6 @@ async def run_record(state: dict) -> dict:
             await asyncio.sleep(0.5 * attempt)
 
     result = {"encounter_id": None, "status": "error", "detail": last_err}
-    await publish(session_id, {"agent": AGENT, "status": "error", **result})
+    await publish(session_id, {"agent": AGENT, "status": "error",
+                               "encounter_id": None, "detail": last_err})
     return {"miatec_write_result": result}

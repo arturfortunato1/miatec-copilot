@@ -51,6 +51,7 @@ export type SpeakerRoles = {
 export type EncounterState = {
   session_id: string;
   transcript: TranscriptSegment[];
+  quality_score?: number | null;
   roles?: SpeakerRoles;
   note: ClinicalNote;
   evidence: Evidence[];
