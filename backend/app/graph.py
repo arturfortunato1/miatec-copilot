@@ -5,13 +5,17 @@ human-in-the-loop interrupt (`interrupt_before=["record"]`) backed by a `MemoryS
 keyed by `thread_id = session_id`. `/ingest` runs the graph to the approval interrupt; `/write`
 resumes it (`graph.ainvoke(None, config)`) so the irreversible Record write only fires after approval.
 
-A conditional edge after Roles routes low-confidence speaker attribution through a review path before
-structuring — the graph itself decides *when to ask for help*. Show THIS graph on the orchestration
-slide; the entire loop (including the pause) lives in one compiled artifact.
+Two conditional edges make the graph self-aware. After Roles, low-confidence speaker attribution is
+routed through a review path before structuring. After the Verifier — which cross-checks the retrieved
+evidence against the note's assessment — weak or contradicting evidence is routed through a reconcile
+path that makes Considerations hedge. The graph itself decides *when to ask for help*. Show THIS graph
+on the orchestration slide; the entire loop (including the pause) lives in one compiled artifact.
 
     START → scribe → roles ─(needs_review)─► roles_review ─┐
-                              └────────(confident)─────────► structuring → evidence → considerations
-                                              → ⏸ approval gate (interrupt_before record) → record → END
+                              └──────(confident)───────────► structuring → evidence → verifier
+       verifier ─(weak/contradicting evidence)─► reconcile ─┐
+                 └──────────(evidence supports)─────────────► considerations
+                                 → ⏸ approval gate (interrupt_before record) → record → END
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ from app.agents.scribe import run_scribe
 from app.agents.roles import run_roles
 from app.agents.structuring import run_structuring
 from app.agents.evidence import run_evidence
+from app.agents.verifier import run_verifier
 from app.agents.considerations import run_considerations
 from app.agents.record import run_record
 from app.events import publish
@@ -38,6 +43,7 @@ class State(TypedDict, total=False):
     roles: dict
     note: dict
     evidence: list
+    verification: dict
     considerations: list
     approved: bool
     miatec_write_result: dict
@@ -66,6 +72,29 @@ def _route_after_roles(state: dict) -> str:
     return "review" if (state.get("roles") or {}).get("needs_review") else "ok"
 
 
+async def run_reconcile(state: dict) -> dict:
+    """Conditional path — the Verifier found the evidence weakly supports (or contradicts) the note.
+
+    Routed here when verification['needs_caution']; publishes a notice and proceeds to Considerations,
+    which reads the verification and hedges. A graph-visible "the agents noticed a mismatch" beat. With
+    well-supported notes this node never runs.
+    """
+    session_id = state["session_id"]
+    v = state.get("verification", {}) or {}
+    pct = round(float(v.get("alignment", 0.0)) * 100)
+    concern = (v.get("concerns") or [v.get("summary") or "evidence weakly supports the note"])[0]
+    await publish(session_id, {
+        "agent": "verifier", "status": "review",
+        "step": f"⚠ low evidence↔note alignment ({pct}%) — Considerations will be more conservative",
+        "reason": str(concern)[:120],
+    })
+    return {}
+
+
+def _route_after_verify(state: dict) -> str:
+    return "caution" if (state.get("verification") or {}).get("needs_caution") else "ok"
+
+
 def build_graph():
     g = StateGraph(State)
     g.add_node("scribe", run_scribe)
@@ -73,6 +102,8 @@ def build_graph():
     g.add_node("roles_review", run_roles_review)
     g.add_node("structuring", run_structuring)
     g.add_node("evidence", run_evidence)
+    g.add_node("verifier", run_verifier)
+    g.add_node("reconcile", run_reconcile)
     g.add_node("considerations", run_considerations)
     g.add_node("record", run_record)
 
@@ -82,8 +113,11 @@ def build_graph():
                             {"review": "roles_review", "ok": "structuring"})
     g.add_edge("roles_review", "structuring")
     g.add_edge("structuring", "evidence")          # Evidence grounds the structured note...
-    g.add_edge("evidence", "considerations")       # ...then Considerations ranks differentials citing it.
-    g.add_edge("considerations", "record")         # ...record is the last node, but...
+    g.add_edge("evidence", "verifier")             # ...the Verifier checks evidence↔note alignment...
+    g.add_conditional_edges("verifier", _route_after_verify,   # ...low alignment → reconcile (caution)...
+                            {"caution": "reconcile", "ok": "considerations"})
+    g.add_edge("reconcile", "considerations")
+    g.add_edge("considerations", "record")         # ...then Considerations ranks differentials; record last,
     g.add_edge("record", END)
 
     # Native HITL: pause BEFORE the irreversible miatec write. /ingest runs to here; /write resumes.

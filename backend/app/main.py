@@ -26,6 +26,7 @@ from sse_starlette.sse import EventSourceResponse
 from app.agents.considerations import run_considerations
 from app.agents.evidence import run_evidence
 from app.agents.structuring import run_structuring
+from app.agents.verifier import run_verifier
 from app.events import publish, subscribe, unsubscribe
 from app.graph import encounter_graph
 from app.schema import ClinicalNote
@@ -79,7 +80,7 @@ async def health() -> dict:
 
 @app.post("/ingest")
 async def ingest(req: IngestRequest) -> dict:
-    """Run the graph (Scribe → Roles → Structuring → Evidence → Considerations) to the approval interrupt."""
+    """Run the graph (Scribe → Roles → Structuring → Evidence → Verifier → Considerations) to the interrupt."""
     # No explicit audio posted → fall back to DEFAULT_AUDIO_REF (the real consult in S3). If that's
     # also unset, Scribe uses its canned pt-BR sample, so the demo always runs.
     audio_ref = req.audio_ref or os.getenv("DEFAULT_AUDIO_REF") or None
@@ -127,15 +128,18 @@ async def update_roles(req: RolesUpdate) -> dict:
                                    "summary": f"{doctor} = doctor, {patient} = patient · clinician-set (100%)",
                                    "reason": "human-in-the-loop correction — note re-derived"})
 
-    # Roles changed → re-derive the note + evidence + considerations from the corrected transcript.
+    # Roles changed → re-derive note + evidence + verification + considerations from the corrected transcript.
     state.update(await run_structuring(state))
     state.update(await run_evidence(state))
+    state.update(await run_verifier(state))
     state.update(await run_considerations(state))
     await encounter_graph.aupdate_state(_cfg(req.session_id), {
         "roles": roles, "transcript": transcript, "note": state["note"],
-        "evidence": state["evidence"], "considerations": state["considerations"],
+        "evidence": state["evidence"], "verification": state["verification"],
+        "considerations": state["considerations"],
     })
-    return {"roles": roles, "note": state["note"], "considerations": state["considerations"]}
+    return {"roles": roles, "note": state["note"], "verification": state["verification"],
+            "considerations": state["considerations"]}
 
 
 @app.post("/approve")
