@@ -65,10 +65,12 @@ async def run_translate(state: dict) -> dict:
     translations = _load_cache(texts)
     if translations is not None:
         await publish(session_id, {"agent": AGENT, "status": "running",
-                                   "step": "Loaded cached translation — skipping re-translation"})
+                                   "step": "Loaded cached translation — replaying"})
+        # Stream the cached result chunk-by-chunk so the cockpit rewrite arrives like the live path.
+        await _apply_streamed(session_id, segments, translations, total, replay_delay=0.45)
     elif claude_configured():
         try:
-            translations = await _translate_live(session_id, texts)
+            translations = await _translate_live(session_id, texts, segments)
             _save_cache(texts, translations)
         except Exception as exc:  # noqa: BLE001 — retries exhausted → keep the original language
             await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
@@ -80,12 +82,11 @@ async def run_translate(state: dict) -> dict:
         translations = [_MOCK_EN.get(t) for t in texts]
         if not any(translations):
             translations = None
+        else:
+            await _apply_streamed(session_id, segments, translations, total, replay_delay=0.45)
 
     degraded = translations is None
     if not degraded:
-        for seg, en in zip(segments, translations):
-            if en:
-                seg["text_en"] = en
         n_done = sum(1 for t in translations if t)
         summary = f"{n_done}/{total} turns translated to clinical English"
         reason = "pipeline normalized to English; the original pt-BR is preserved for review"
@@ -98,31 +99,59 @@ async def run_translate(state: dict) -> dict:
     return {"transcript": segments}
 
 
-async def _translate_live(session_id: str, texts: list) -> list:
-    """Translate all batches CONCURRENTLY (each with its own visible retry) and reassemble in order.
+async def _publish_partial(session_id: str, segments: list, done: int, total: int) -> None:
+    """Push the transcript WITH the translations applied so far — the cockpit rewrites those lines
+    immediately (status "running" frames carry the partial; "done" still closes the agent)."""
+    await publish(session_id, {"agent": AGENT, "status": "running",
+                               "transcript": [dict(s) for s in segments],
+                               "step": f"Translating… {done}/{total} turns in clinical English"})
+
+
+async def _apply_streamed(session_id: str, segments: list, translations: list, total: int,
+                          replay_delay: float) -> None:
+    """Apply a pre-computed translation (cache/stub) in batches, publishing each — the same
+    progressive arrival the live path has, so the demo always streams."""
+    done = 0
+    for start in range(0, total, _BATCH):
+        for i in range(start, min(start + _BATCH, total)):
+            if translations[i]:
+                segments[i]["text_en"] = translations[i]
+                done += 1
+        await _publish_partial(session_id, segments, done, total)
+        if start + _BATCH < total:
+            await asyncio.sleep(replay_delay)
+
+
+async def _translate_live(session_id: str, texts: list, segments: list) -> list:
+    """Translate all batches CONCURRENTLY and STREAM each into the UI the moment it lands.
 
     A 70-turn consult is ~3 batches; running them in parallel cuts translation wall-clock to one
-    batch's latency. Progress still narrates per batch as each lands, so the cockpit stays alive.
+    batch's latency. As each batch resolves (completion order, not index order), its translations are
+    written into the shared transcript and published — the cockpit rewrites those lines immediately
+    while the other batches are still in flight. Returns the full ordered list for the cache.
     """
-    chunks = [texts[s:s + _BATCH] for s in range(0, len(texts), _BATCH)]
+    chunks = [(s, texts[s:s + _BATCH]) for s in range(0, len(texts), _BATCH)]
     if len(chunks) > 1:
         await publish(session_id, {"agent": AGENT, "status": "running",
                                    "step": f"Translating {len(texts)} turns in {len(chunks)} parallel batches…"})
+    out: list = [None] * len(texts)
     done_count = 0
 
-    async def one(i: int, chunk: list) -> list:
+    async def one(i: int, start: int, chunk: list) -> None:
         nonlocal done_count
         result = await call_with_retry(
             session_id, AGENT, lambda c=chunk: _translate_batch(c),
             step=f"translation batch {i + 1}",
         )
-        done_count += 1
-        await publish(session_id, {"agent": AGENT, "status": "running",
-                                   "step": f"Translating… batch {done_count}/{len(chunks)} done"})
-        return result
+        for j, en in enumerate(result):
+            out[start + j] = en
+            if en:
+                segments[start + j]["text_en"] = en
+        done_count += len(result)
+        await _publish_partial(session_id, segments, done_count, len(texts))
 
-    results = await asyncio.gather(*(one(i, c) for i, c in enumerate(chunks)))
-    return [t for r in results for t in r]
+    await asyncio.gather(*(one(i, start, c) for i, (start, c) in enumerate(chunks)))
+    return out
 
 
 def _translate_batch(chunk: list) -> list:

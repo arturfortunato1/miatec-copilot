@@ -46,45 +46,55 @@ export function TranscriptBody({
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [showOriginal, setShowOriginal] = useState(false);
-  const [wave, setWave] = useState(false);
-  const hadTranslationRef = useRef(false);
-  const waveRef = useRef(false);
+  // Translations STREAM in per batch. Each line plays its rewrite sweep once, the moment its
+  // translation lands: `waving` maps segment index → stagger slot within its just-arrived batch.
+  const [waving, setWaving] = useState<Map<number, number>>(new Map());
+  const seenEnRef = useRef<Set<number>>(new Set());
+  const timersRef = useRef<number[]>([]);
 
   const hasTranslation = transcript.some((s) => !!s.text_en);
 
-  // Rising edge of "the transcript is now translated" → play the rewrite wave from the top.
-  // Declared BEFORE the autoscroll effect so waveRef is set when that effect runs on the same commit.
+  // Detect newly-translated lines on every transcript update (batches arrive in any order) and
+  // animate exactly those. A reset (restart) clears the seen-set so the next run replays.
   useEffect(() => {
-    if (hasTranslation && !hadTranslationRef.current) {
-      hadTranslationRef.current = true;
-      waveRef.current = true;
-      setWave(true);
-      if (ref.current) ref.current.scrollTop = 0; // watch the rewrite cascade from the first line
-      const total = transcript.length * WAVE_STAGGER_MS + WAVE_TAIL_MS;
-      const t = window.setTimeout(() => {
-        waveRef.current = false;
-        setWave(false);
-      }, total);
-      return () => clearTimeout(t);
+    if (transcript.length === 0) {
+      seenEnRef.current = new Set();
+      setWaving(new Map());
+      return;
     }
-    if (!hasTranslation) hadTranslationRef.current = false; // session restarted
-  }, [hasTranslation, transcript.length]);
+    const fresh: number[] = [];
+    transcript.forEach((s, i) => {
+      if (s.text_en && !seenEnRef.current.has(i)) fresh.push(i);
+    });
+    if (fresh.length === 0) return;
+    fresh.forEach((i) => seenEnRef.current.add(i));
+    setWaving((prev) => {
+      const next = new Map(prev);
+      fresh.forEach((idx, order) => next.set(idx, order));
+      return next;
+    });
+    const ttl = fresh.length * WAVE_STAGGER_MS + WAVE_TAIL_MS;
+    const t = window.setTimeout(() => {
+      setWaving((prev) => {
+        const next = new Map(prev);
+        fresh.forEach((idx) => next.delete(idx));
+        return next;
+      });
+    }, ttl);
+    timersRef.current.push(t);
+  }, [transcript]);
 
-  // Keep the newest line in view while streaming — but never fight the wave's scroll-to-top.
+  useEffect(() => () => { timersRef.current.forEach(clearTimeout); }, []);
+
+  // Keep the newest line in view while the capture streams.
   useEffect(() => {
-    if (waveRef.current) return;
     const el = ref.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [transcript]);
 
-  // Toggling language mid-wave would swap the animated spans for static ones mid-flight (and the
-  // wave never replays) — so any toggle simply ends the wave and shows plain text. Deterministic.
-  const endWave = () => {
-    if (waveRef.current) {
-      waveRef.current = false;
-      setWave(false);
-    }
-  };
+  // Toggling language mid-sweep would swap animated spans for static ones mid-flight — any toggle
+  // simply ends the in-flight sweeps and shows plain text. Deterministic.
+  const endWave = () => setWaving(new Map());
 
   const resolve = (speaker: string) => roles?.mapping?.[speaker] ?? speaker;
   const doctor = roles ? Object.entries(roles.mapping).find(([, r]) => r === "doctor")?.[0] : null;
@@ -130,11 +140,12 @@ export function TranscriptBody({
           const low = seg.confidence < 0.7;
           const who = resolve(seg.speaker);
           const showEn = !!seg.text_en && !showOriginal;
+          const order = waving.get(i);
           return (
             <div key={i} className={`turn ${low ? "low" : ""}`}>
               <span className="who" data-role={roleData(who)}>{who}</span>
-              {showEn && wave ? (
-                <span className="txt rw" style={{ ["--d" as string]: `${i * WAVE_STAGGER_MS}ms` }}>
+              {showEn && order !== undefined ? (
+                <span className="txt rw" style={{ ["--d" as string]: `${order * WAVE_STAGGER_MS}ms` }}>
                   <span className="t-en">{seg.text_en}</span>
                   <span className="t-pt" aria-hidden>{seg.text}</span>
                   <span className="t-sweep" aria-hidden />
