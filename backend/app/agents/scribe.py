@@ -104,40 +104,54 @@ async def run_scribe(state: dict) -> dict:
             await publish(session_id, {"agent": AGENT, "status": "running",
                                        "step": f"Loaded cached transcript ({len(segments)} turns) — skipping re-transcription"})
         else:
-            # DEMO HYBRID: live-stream the opening ~_DEMO_SECONDS (real-time capture effect) while a fast
-            # BATCH job transcribes the whole ~9-min clip in the BACKGROUND. The batch is authoritative;
-            # the stream is a decorative preview. When batch lands we fall through to the line-by-line
-            # reveal of the full transcript below — so total wait ≈ batch (~50s), not the audio's length.
-            # 1) Short LIVE preview of the opening ~_DEMO_SECONDS — the real-time-capture demo. Runs
-            #    on its own (sequential, not concurrent: a batch job polling alongside the stream
-            #    contends on the boto3/HTTP layer and stalls the very finals this preview shows).
+            # DEMO HYBRID: the consult is ~9 min — too long to transcribe end-to-end live. So the full
+            # BATCH job and a live PREVIEW of the opening run IN PARALLEL: the batch (whole clip, the
+            # authoritative transcript) loads in the background on a worker thread while the cockpit
+            # streams the opening ~_DEMO_SECONDS live. When both are in, the full transcript reveals
+            # line-by-line below — total wait ≈ batch (~50s), not the audio's length, and the user never
+            # waits on the preview. Reliable concurrency: PCM is pre-read and the batch client pre-warmed
+            # up front, so the stream's S3 read and the batch's boto3 calls don't race (that race hung
+            # the stream before); the batch runs as ONE blocking thread, not interleaved on the loop.
             stream_ref = _resolve_stream_ref(audio_ref)
             if stream_ref and _DEMO_SECONDS > 0 and os.getenv("SCRIBE_STREAMING", "1") != "0":
+                batch_task = None
                 try:
-                    # Fast feed (not real-time): Transcribe finalizes the opening turns a beat after it
-                    # receives them, so a quick feed surfaces them live/early; real-time bunches them late.
-                    await _transcribe_streaming(session_id, stream_ref, vocab,
-                                                cap_seconds=_DEMO_SECONDS, realtime=False)
-                except Exception as exc:  # noqa: BLE001 — the live preview is decorative, never fatal
-                    await publish(session_id, {"agent": AGENT, "status": "running", "error": str(exc),
-                                               "step": "Live preview unavailable — transcribing the full consultation"})
-
-            # 2) Full transcript via batch (authoritative, ~50s), revealed line-by-line below when it
-            #    lands. Bounded retry: a failed job is usually transient — one re-attempt, never a loop.
-            for attempt in (1, 2):
-                try:
-                    segments = await _transcribe_live(session_id, audio_ref, vocab)
+                    pcm = await asyncio.to_thread(_read_wav_pcm, stream_ref)
+                    await asyncio.to_thread(client, "transcribe")  # warm the boto3 model off the hot path
+                    batch_task = asyncio.create_task(asyncio.to_thread(_transcribe_batch_sync, audio_ref, vocab))
+                    try:
+                        await _transcribe_streaming(session_id, pcm, vocab, cap_seconds=_DEMO_SECONDS)
+                    except Exception as exc:  # noqa: BLE001 — preview is decorative; keep the batch going
+                        await publish(session_id, {"agent": AGENT, "status": "running", "error": str(exc),
+                                                   "step": "Live preview unavailable — finishing the full transcript"})
+                    await publish(session_id, {"agent": AGENT, "status": "running",
+                                               "step": "Finalizing the full consultation transcript…"})
+                    segments = await batch_task  # authoritative; usually already done by now
                     source = "s3"
                     _save_cache(audio_ref, vocab, segments)
-                    break
-                except Exception as exc:  # noqa: BLE001 — surface, retry once, then fall back
+                except Exception as exc:  # noqa: BLE001 — pre-read / batch failed → narrated retry below
                     segments = None
-                    if attempt == 1:
-                        await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
-                                                   "step": "Transcribe failed — retrying the job once"})
-                    else:
-                        await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
-                                                   "step": "Transcribe failed twice — falling back to the sample transcript"})
+                    if batch_task and not batch_task.done():
+                        batch_task.cancel()
+                    await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                               "step": "Parallel transcription failed — retrying"})
+
+            # Plain batch: non-PCM uploads, hybrid disabled, or a failed parallel run. Bounded retry.
+            if segments is None:
+                for attempt in (1, 2):
+                    try:
+                        segments = await _transcribe_live(session_id, audio_ref, vocab)
+                        source = "s3"
+                        _save_cache(audio_ref, vocab, segments)
+                        break
+                    except Exception as exc:  # noqa: BLE001 — surface, retry once, then fall back
+                        segments = None
+                        if attempt == 1:
+                            await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                                       "step": "Transcribe failed — retrying the job once"})
+                        else:
+                            await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                                       "step": "Transcribe failed twice — falling back to the sample transcript"})
 
     if not segments:
         source = "mock"
@@ -327,30 +341,20 @@ def _clean_segments(items: list) -> list:
     return out
 
 
-async def _transcribe_streaming(session_id: str, wav_ref: str, vocab=None,
-                                cap_seconds: int | None = None, realtime: bool = False) -> list:
-    """Open a live AWS Transcribe stream, feed it the PCM WAV in paced chunks, and publish turns as they
-    finalize (progressive load). Returns the final cleaned segments. Raises on any failure so run_scribe
-    falls back to batch. Imports the streaming SDK lazily so a missing dep never breaks app boot.
+async def _transcribe_streaming(session_id: str, pcm: bytes, vocab=None,
+                                cap_seconds: int | None = None) -> list:
+    """Open a live AWS Transcribe stream, feed it pre-read PCM in paced chunks, and publish turns as
+    they finalize (progressive load). `pcm` is 16kHz mono s16le frames, already read + validated by
+    _read_wav_pcm OFF the hot path — so it can't contend on S3 with a batch job running in parallel
+    (that contention previously hung the read). Returns the cleaned segments; raises on failure. The
+    streaming SDK is imported lazily so a missing dep never breaks app boot.
 
-    cap_seconds: feed only the first N seconds of audio, then end the stream (the demo preview).
-    realtime: pace the feed to ~1x so the opening visibly 'captures' live (vs as-fast-as-allowed)."""
-    import io
-    import wave as wavemod
-
+    cap_seconds: feed only the first N seconds of audio, then end the stream (the demo preview window)."""
     from amazon_transcribe.client import TranscribeStreamingClient
     from amazon_transcribe.handlers import TranscriptResultStreamHandler
 
     await publish(session_id, {"agent": AGENT, "status": "running",
                                "step": "Opening a live AWS Transcribe stream (pt-BR, diarization)…"})
-    bucket, key = _split_s3(wav_ref)
-    raw = await asyncio.to_thread(lambda: client("s3").get_object(Bucket=bucket, Key=key)["Body"].read())
-    wf = wavemod.open(io.BytesIO(raw), "rb")
-    if wf.getnchannels() != 1 or wf.getframerate() != 16000 or wf.getsampwidth() != 2:
-        raise RuntimeError(f"stream audio must be 16kHz mono PCM s16le (got "
-                           f"{wf.getnchannels()}ch/{wf.getframerate()}Hz/{wf.getsampwidth()*8}bit)")
-    pcm = wf.readframes(wf.getnframes())
-
     region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-west-2"
     tclient = TranscribeStreamingClient(region=region)
     kwargs = dict(language_code="pt-BR", media_sample_rate_hz=16000, media_encoding="pcm",
@@ -396,7 +400,6 @@ async def _transcribe_streaming(session_id: str, wav_ref: str, vocab=None,
     async def _writer():
         chunk = max(2, int(16000 * 2 * _STREAM_CHUNK_MS / 1000))  # bytes per ~_STREAM_CHUNK_MS of PCM
         cap_bytes = int(16000 * 2 * cap_seconds) if cap_seconds else None
-        pacing = (_STREAM_CHUNK_MS / 1000.0) if realtime else _STREAM_PACING  # ~1x feed if realtime
         sent = 0
         for off in range(0, len(pcm), chunk):
             buf = pcm[off:off + chunk]
@@ -404,8 +407,8 @@ async def _transcribe_streaming(session_id: str, wav_ref: str, vocab=None,
             sent += len(buf)
             if cap_bytes and sent >= cap_bytes:  # demo preview: stop after the opening N seconds
                 break
-            if pacing > 0:
-                await asyncio.sleep(pacing)
+            if _STREAM_PACING > 0:
+                await asyncio.sleep(_STREAM_PACING)
         await stream.input_stream.end_stream()
 
     await asyncio.gather(_writer(), _Handler(stream.output_stream).handle_events())
@@ -416,6 +419,42 @@ async def _transcribe_streaming(session_id: str, wav_ref: str, vocab=None,
     if not segments:
         raise RuntimeError("stream produced no segments")
     return segments
+
+
+def _read_wav_pcm(wav_ref: str) -> bytes:
+    """Read a 16kHz mono s16le PCM WAV from S3 → raw PCM frames (validates format). Synchronous; called
+    via to_thread up front, before the live preview + batch go concurrent, so the S3 read can't race."""
+    import io
+    import wave as wavemod
+    bucket, key = _split_s3(wav_ref)
+    raw = client("s3").get_object(Bucket=bucket, Key=key)["Body"].read()
+    wf = wavemod.open(io.BytesIO(raw), "rb")
+    if wf.getnchannels() != 1 or wf.getframerate() != 16000 or wf.getsampwidth() != 2:
+        raise RuntimeError(f"stream audio must be 16kHz mono PCM s16le (got "
+                           f"{wf.getnchannels()}ch/{wf.getframerate()}Hz/{wf.getsampwidth()*8}bit)")
+    return wf.readframes(wf.getnframes())
+
+
+def _transcribe_batch_sync(audio_ref: str, vocab=None) -> list:
+    """Blocking AWS Transcribe batch job (start → poll → parse), NO SSE publishing. Runs in a worker
+    thread (asyncio.to_thread) so it transcribes the full clip in PARALLEL with the live preview without
+    the two interleaving on the event loop — the preview owns the cockpit narration. Raises on failure."""
+    s3_uri = _ensure_in_s3(audio_ref)
+    job_name = f"miatec-scribe-{uuid.uuid4().hex[:12]}"
+    _start_job(job_name, s3_uri, vocab)
+    start = time.monotonic()
+    while True:
+        job = _get_job(job_name)
+        status = job["TranscriptionJobStatus"]
+        if status in ("COMPLETED", "FAILED"):
+            break
+        if time.monotonic() - start > _POLL_TIMEOUT_S:
+            raise TimeoutError(f"transcription job {job_name} timed out")
+        time.sleep(3)
+    if status == "FAILED":
+        raise RuntimeError(job.get("FailureReason", "transcription failed"))
+    data = httpx.get(job["Transcript"]["TranscriptFileUri"], timeout=30).json()
+    return _parse_transcript(data)
 
 
 # ── transcript cache (per audio_ref) ──────────────────────────────────────────
