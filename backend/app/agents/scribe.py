@@ -118,7 +118,7 @@ async def run_scribe(state: dict) -> dict:
             # the stream before); the batch runs as ONE blocking thread, not interleaved on the loop.
             stream_ref = _resolve_stream_ref(audio_ref)
             if stream_ref and _DEMO_SECONDS > 0 and os.getenv("SCRIBE_STREAMING", "1") != "0":
-                batch_task = None
+                batch_task = preview_task = None
                 try:
                     pcm = await asyncio.to_thread(_read_wav_pcm, stream_ref)
                     await asyncio.to_thread(client, "transcribe")  # warm the boto3 model off the hot path
@@ -135,23 +135,29 @@ async def run_scribe(state: dict) -> dict:
                         pct = min(95, int((time.monotonic() - batch_started) / _BATCH_EXPECTED_S * 100))
                         return f" · loading full transcript {pct}%"
 
-                    try:
-                        await _transcribe_streaming(session_id, pcm, vocab,
-                                                    cap_seconds=_DEMO_SECONDS, status_suffix_fn=_batch_suffix)
-                    except Exception as exc:  # noqa: BLE001 — preview is decorative; keep the batch going
-                        await publish(session_id, {"agent": AGENT, "status": "running", "error": str(exc),
-                                                   "step": "Live preview unavailable — finishing the full transcript"})
-                    await publish(session_id, {"agent": AGENT, "status": "running",
-                                               "step": "Finalizing the full consultation transcript…"})
-                    segments = await batch_task  # authoritative; usually already done by now
+                    # The live preview streams the opening WHILE the batch loads. The reveal is gated on
+                    # the BATCH, not the preview: the moment the full transcript is ready we STOP the live
+                    # stream and reveal the whole thing — we never wait for the preview to finish its
+                    # turns (the preview length is just a safety cap so it keeps producing until then).
+                    preview_task = asyncio.create_task(
+                        _transcribe_streaming(session_id, pcm, vocab,
+                                              cap_seconds=_DEMO_SECONDS, status_suffix_fn=_batch_suffix))
+                    segments = await batch_task  # ← gate on the FULL transcript being ready
                     source = "s3"
                     _save_cache(audio_ref, vocab, segments)
                 except Exception as exc:  # noqa: BLE001 — pre-read / batch failed → narrated retry below
                     segments = None
-                    if batch_task and not batch_task.done():
-                        batch_task.cancel()
                     await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
                                                "step": "Parallel transcription failed — retrying"})
+                finally:
+                    # Full transcript is in (or failed) → stop the live preview NOW and reveal the whole
+                    # thing below; don't drain the preview's remaining turns.
+                    if preview_task is not None:
+                        preview_task.cancel()
+                        try:
+                            await preview_task
+                        except BaseException:  # noqa: BLE001 — cancellation or a decorative-preview error
+                            pass
 
             # Plain batch: non-PCM uploads, hybrid disabled, or a failed parallel run. Bounded retry.
             if segments is None:
@@ -446,9 +452,15 @@ async def _transcribe_streaming(session_id: str, pcm: bytes, vocab=None,
     try:
         await asyncio.gather(_writer(), _Handler(stream.output_stream).handle_events())
     finally:
+        # Stop the ticker promptly — runs on normal completion AND when the caller cancels the preview
+        # early (full transcript ready). Cancel rather than await so we never hang on its sleep.
         done[0] = True
         if ticker:
-            await ticker
+            ticker.cancel()
+            try:
+                await ticker
+            except BaseException:  # noqa: BLE001
+                pass
     if items:
         await _emit()  # final live frame so the cockpit shows the full transcript before "done"
 
