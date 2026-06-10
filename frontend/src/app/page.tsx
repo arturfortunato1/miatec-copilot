@@ -29,7 +29,7 @@ export default function ControlRoom() {
   const dir = useStageDirector();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const [selected, setSelected] = useState<Set<number>>(new Set());
   const [rubricOpen, setRubricOpen] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
@@ -78,7 +78,7 @@ export default function ControlRoom() {
     dir.reset();
     setSessionId(id);
     setBusy(false);
-    setDismissed(new Set());
+    setSelected(new Set());
 
     const es = new EventSource(`${API_BASE}/stream/${id}`);
     esRef.current = es;
@@ -96,9 +96,9 @@ export default function ControlRoom() {
     };
   }, [dir, handleConnected]);
 
-  const toggleDismiss = useCallback((i: number) => {
-    setDismissed((d) => {
-      const next = new Set(d);
+  const toggleSelect = useCallback((i: number) => {
+    setSelected((s) => {
+      const next = new Set(s);
       if (next.has(i)) next.delete(i);
       else next.add(i);
       return next;
@@ -122,7 +122,9 @@ export default function ControlRoom() {
     if (!sessionId || !dir.note) return;
     setBusy(true);
     try {
-      await approve(sessionId, dir.note, Array.from(dismissed));
+      // Send indices the doctor did NOT confirm as dismissed (invert the selection).
+      const dismissedIndices = dir.considerations.map((_, i) => i).filter((i) => !selected.has(i));
+      await approve(sessionId, dir.note, dismissedIndices);
       const state = await writeToMiatec(sessionId);
       // Mark approved only once the write lands — a transient write failure leaves the button
       // enabled so the clinician can simply retry (the backend write is idempotency-keyed).
@@ -133,7 +135,7 @@ export default function ControlRoom() {
     } finally {
       setBusy(false);
     }
-  }, [dir, dismissed, sessionId]);
+  }, [dir, selected, sessionId]);
 
   const setNote = useCallback((n: ClinicalNote) => dir.setNote(n), [dir]);
 
@@ -240,7 +242,7 @@ export default function ControlRoom() {
                 waiting={gateOpen}
                 busy={busy}
                 approved={dir.approved}
-                canApprove={!!dir.note}
+                canApprove={!!dir.note && (dir.considerations.length === 0 || selected.size > 0)}
                 onApprove={onApproveAndWrite}
                 result={dir.writeResult}
               />
@@ -254,7 +256,7 @@ export default function ControlRoom() {
               degraded={dir.captions.considerations.degraded}
               metric={topConsideration != null ? { label: "top", value: topConsideration } : null}
             >
-              <ConsiderationsBody considerations={dir.considerations} dismissed={dismissed} onToggle={toggleDismiss} />
+              <ConsiderationsBody considerations={dir.considerations} selected={selected} onToggle={toggleSelect} gateOpen={gateOpen} />
             </Panel>
           </div>
 

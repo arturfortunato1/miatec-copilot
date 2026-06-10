@@ -286,28 +286,54 @@ export function VerifierBody({ verification }: { verification: Verification | nu
 /* ── Considerations (ranked differentials) ────────────────────────────────── */
 export function ConsiderationsBody({
   considerations,
-  dismissed,
+  selected,
   onToggle,
+  gateOpen,
 }: {
   considerations: Consideration[];
-  dismissed: Set<number>;
+  selected: Set<number>;
   onToggle: (i: number) => void;
+  gateOpen: boolean;
 }) {
   if (considerations.length === 0) return <p className="panel-empty">reasoning…</p>;
+  const anySelected = selected.size > 0;
   return (
     <>
+      {gateOpen && (
+        <div className="cons-gate-bar">
+          {anySelected ? (
+            <span className="cons-count">{selected.size} of {considerations.length} confirmed</span>
+          ) : (
+            <span className="cons-prompt">Select the considerations that match this patient</span>
+          )}
+          <span className="cons-gate-hint">click a card to confirm</span>
+        </div>
+      )}
       {considerations.map((c, i) => {
-        const isDismissed = dismissed.has(i);
+        const isSelected = selected.has(i);
+        const unconfirmed = anySelected && !isSelected;
         return (
-          <div key={i} className={`consideration ${isDismissed ? "dismissed" : ""}`}>
+          <div
+            key={i}
+            className={`consideration${isSelected ? " confirmed" : ""}${unconfirmed ? " unconfirmed" : ""}${gateOpen ? " selectable" : ""}`}
+            onClick={() => gateOpen && onToggle(i)}
+          >
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <span className="label">
-                <span style={{ color: "var(--text-3)", fontFamily: "var(--font-mono)", fontSize: 12, marginRight: 6 }}>{i + 1}</span>
+                <span style={{ fontFamily: "var(--font-mono)", fontSize: 12, marginRight: 6, color: isSelected ? "var(--conf-high)" : "var(--text-3)" }}>
+                  {isSelected ? "✓" : i + 1}
+                </span>
                 {c.label}
               </span>
-              <button className="btn btn-ghost" style={{ padding: "3px 9px", fontSize: 10 }} onClick={() => onToggle(i)}>
-                {isDismissed ? "restore" : "dismiss"}
-              </button>
+              {gateOpen && (
+                <button
+                  className={`btn ${isSelected ? "btn-confirmed" : "btn-ghost"}`}
+                  style={{ padding: "3px 11px", fontSize: 10, flexShrink: 0 }}
+                  onClick={(e) => { e.stopPropagation(); onToggle(i); }}
+                >
+                  {isSelected ? "✓ Confirmed" : "Confirm"}
+                </button>
+              )}
             </div>
             <p className="why">{c.rationale}</p>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9 }}>
@@ -360,7 +386,7 @@ export function RecordGateBody({
     return (
       <div className="gate-box">
         <div className="gh">Your approval is the gate</div>
-        <p className="gp">Edit the note and dismiss considerations on the left. Nothing writes to miatec until you approve.</p>
+        <p className="gp">Confirm the relevant considerations and edit the note if needed. Nothing writes to miatec until you approve.</p>
         <button className="btn btn-approve" onClick={onApprove} disabled={busy || approved || !canApprove}>
           {approved ? "Approved ✓" : busy ? "Writing…" : "Approve & Write to miatec"}
         </button>
