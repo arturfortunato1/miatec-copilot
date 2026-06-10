@@ -84,6 +84,12 @@ async def health() -> dict:
 
 _bg_tasks: set = set()  # hold references to detached graph runs so they aren't garbage-collected
 
+_session_locks: dict = {}  # serialize HITL mutations per session — a double-clicked Swap/Approve must not interleave
+
+
+def _lock(session_id: str) -> asyncio.Lock:
+    return _session_locks.setdefault(session_id, asyncio.Lock())
+
 
 async def _run_to_interrupt(session_id: str, audio_ref: Optional[str]) -> None:
     """Run the graph to the approval interrupt as a BACKGROUND task (publishes progress over SSE).
@@ -171,7 +177,16 @@ async def audio(session_id: str):
 
 @app.post("/roles")
 async def update_roles(req: RolesUpdate) -> dict:
-    """Human-in-the-loop speaker correction: swap or set doctor/patient, then re-derive the note."""
+    """Human-in-the-loop speaker correction: swap or set doctor/patient, then re-derive the note.
+
+    Serialized per session: a double-clicked Swap (or a retry racing the first request) re-derives
+    from the LATEST checkpoint instead of interleaving two stale re-derivations.
+    """
+    async with _lock(req.session_id):
+        return await _update_roles_locked(req)
+
+
+async def _update_roles_locked(req: RolesUpdate) -> dict:
     state = await _values(req.session_id)
     if state is None:
         raise HTTPException(404, "unknown session")
@@ -216,43 +231,45 @@ async def update_roles(req: RolesUpdate) -> dict:
 @app.post("/approve")
 async def approve(req: ApproveRequest) -> dict:
     """Apply the doctor's edits + approval into the checkpoint (nothing is written until /write)."""
-    state = await _values(req.session_id)
-    if state is None:
-        raise HTTPException(404, "unknown session")
+    async with _lock(req.session_id):
+        state = await _values(req.session_id)
+        if state is None:
+            raise HTTPException(404, "unknown session")
 
-    note = req.note.model_dump()
-    considerations = [dict(c) for c in state.get("considerations", [])]
-    for idx in req.dismissed_considerations:
-        if 0 <= idx < len(considerations):
-            considerations[idx]["dismissed"] = True
+        note = req.note.model_dump()
+        considerations = [dict(c) for c in state.get("considerations", [])]
+        for idx in req.dismissed_considerations:
+            if 0 <= idx < len(considerations):
+                considerations[idx]["dismissed"] = True
 
-    await encounter_graph.aupdate_state(_cfg(req.session_id),
-                                        {"note": note, "considerations": considerations, "approved": True})
-    await publish(req.session_id, {"agent": "human_gate", "status": "done"})
-    preview = {
-        "encounter": note,
-        "considerations": [c for c in considerations if not c.get("dismissed")],
-    }
-    return {"approved": True, "miatec_preview": preview}
+        await encounter_graph.aupdate_state(_cfg(req.session_id),
+                                            {"note": note, "considerations": considerations, "approved": True})
+        await publish(req.session_id, {"agent": "human_gate", "status": "done"})
+        preview = {
+            "encounter": note,
+            "considerations": [c for c in considerations if not c.get("dismissed")],
+        }
+        return {"approved": True, "miatec_preview": preview}
 
 
 @app.post("/write/{session_id}")
 async def write(session_id: str) -> dict:
     """Resume the graph past the approval interrupt — the Record agent writes the note into miatec."""
-    state = await _values(session_id)
-    if state is None:
-        raise HTTPException(404, "unknown session")
-    if not state.get("approved"):
-        raise HTTPException(409, "note not approved by clinician")
+    async with _lock(session_id):
+        state = await _values(session_id)
+        if state is None:
+            raise HTTPException(404, "unknown session")
+        if not state.get("approved"):
+            raise HTTPException(409, "note not approved by clinician")
 
-    # Final safety gate: never write a malformed note into miatec (the irreversible action).
-    try:
-        ClinicalNote(**(state.get("note") or {}))
-    except Exception as exc:  # noqa: BLE001 — surface as a clear client error, don't write
-        raise HTTPException(422, f"approved note failed validation: {exc}")
+        # Final safety gate: never write a malformed note into miatec (the irreversible action).
+        try:
+            ClinicalNote(**(state.get("note") or {}))
+        except Exception as exc:  # noqa: BLE001 — surface as a clear client error, don't write
+            raise HTTPException(422, f"approved note failed validation: {exc}")
 
-    state = await encounter_graph.ainvoke(None, _cfg(session_id))  # resume → record → END
-    return state
+        state = await encounter_graph.ainvoke(None, _cfg(session_id))  # resume → record → END
+        return state
 
 
 @app.get("/stream/{session_id}")

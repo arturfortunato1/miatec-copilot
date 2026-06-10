@@ -18,7 +18,12 @@ which fall through on missing keys **and on runtime failure**:
    DeepSeek — in all regions. Nova is verified working from Fargate via the task role.
 4. **Stub** — canned pt-BR output, so the loop never breaks.
 
-- **Env:** `AI_GATEWAY_API_KEY` + `GATEWAY_MODEL` (preferred) · `ANTHROPIC_API_KEY` · `BEDROCK_MODEL_ID` (Nova).
+- **Two model tiers:** the mechanical agents (Translate, Roles, Verifier) run on the **fast tier**
+  (`GATEWAY_MODEL_FAST`, default `anthropic/claude-haiku-4.5`) — translation batches run in
+  parallel — while Structuring and Considerations keep the full model. `claude_json` **self-repairs**
+  malformed/truncated JSON: the model is shown its own broken output + the parser error and re-emits,
+  once, before the caller's retry/fallback chain takes over.
+- **Env:** `AI_GATEWAY_API_KEY` + `GATEWAY_MODEL` (+ `GATEWAY_MODEL_FAST`) (preferred) · `ANTHROPIC_API_KEY` · `BEDROCK_MODEL_ID` (Nova).
 - **Code:** `backend/app/llm.py`, `agents/roles.py`, `agents/structuring.py`, `agents/verifier.py`, `agents/considerations.py`.
 
 ## Speech-to-text (Scribe) → AWS Transcribe (pt-BR)

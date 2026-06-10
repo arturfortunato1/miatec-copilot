@@ -90,7 +90,8 @@ def _assign_roles_llm(transcript: list, labels: list) -> dict:
     convo = "\n".join(
         f'{(s.get("speaker_label") or s.get("speaker"))}: {s.get("text_en") or s.get("text", "")}'
         for s in turns)
-    data = claude_json(_SYSTEM, f"Labels present: {labels}\n\nTranscript:\n{convo}", max_tokens=300)
+    data = claude_json(_SYSTEM, f"Labels present: {labels}\n\nTranscript:\n{convo}", max_tokens=300,
+                       fast=True)  # mechanical attribution — the fast tier keeps the demo snappy
 
     doctor = data.get("doctor_label")
     patient = data.get("patient_label")

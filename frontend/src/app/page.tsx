@@ -123,8 +123,10 @@ export default function ControlRoom() {
     setBusy(true);
     try {
       await approve(sessionId, dir.note, Array.from(dismissed));
-      dir.applyApproved();
       const state = await writeToMiatec(sessionId);
+      // Mark approved only once the write lands — a transient write failure leaves the button
+      // enabled so the clinician can simply retry (the backend write is idempotency-keyed).
+      dir.applyApproved();
       dir.applyWriteResult(state.miatec_write_result ?? null);
     } catch (e: unknown) {
       dir.applyEvent({ agent: "record", status: "error", step: "approve / write failed", detail: String(e) } as AgentEvent);

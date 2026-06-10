@@ -84,14 +84,22 @@ async def run_scribe(state: dict) -> dict:
             await publish(session_id, {"agent": AGENT, "status": "running",
                                        "step": f"Loaded cached transcript ({len(segments)} turns) — skipping re-transcription"})
         else:
-            try:
-                segments = await _transcribe_live(session_id, audio_ref, vocab)
-                source = "s3"
-                _save_cache(audio_ref, vocab, segments)
-            except Exception as exc:  # noqa: BLE001 — surface, then fall back so the demo survives
-                await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
-                                           "step": "Transcribe failed — falling back to the sample transcript"})
-                segments = None
+            # Bounded retry: a failed Transcribe job is usually a transient (throttle, S3 propagation)
+            # — one visible re-attempt before the honest fallback, never an endless loop.
+            for attempt in (1, 2):
+                try:
+                    segments = await _transcribe_live(session_id, audio_ref, vocab)
+                    source = "s3"
+                    _save_cache(audio_ref, vocab, segments)
+                    break
+                except Exception as exc:  # noqa: BLE001 — surface, retry once, then fall back
+                    segments = None
+                    if attempt == 1:
+                        await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                                   "step": "Transcribe failed — retrying the job once"})
+                    else:
+                        await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                                   "step": "Transcribe failed twice — falling back to the sample transcript"})
 
     if not segments:
         source = "mock"

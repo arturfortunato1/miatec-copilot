@@ -25,7 +25,7 @@ handling. See [`NEXT_Hackathon_Build_Plan.md`](./NEXT_Hackathon_Build_Plan.md) f
 3. **Roles** attributes each speaker to **doctor or patient** — a reasoned step with a confidence score.
 4. **Structuring** turns the role-labeled transcript into a validated SOAP note (English).
 5. **Evidence** grounds it with cited guidelines/literature (Exa, English query → international sources).
-6. **Verifier** cross-checks that the evidence actually supports the note's assessment — low alignment routes a conditional branch and makes the next step hedge.
+6. **Verifier** cross-checks that the evidence actually supports the note's assessment — low alignment triggers the **reconcile loop**: re-query the literature with a refined, assessment-focused query, re-verify the merged evidence, and only then rank (hedging if it's still weak).
 7. **Considerations** ranks differential considerations with rationale + evidence links.
 8. **⏸ Human-in-the-loop** — the doctor confirms speakers, edits, dismisses, approves.
 9. **Record** writes the approved encounter to the **miatec staging store** (DynamoDB) — a conditional, idempotency-keyed put: safe to retry, writes once.
@@ -139,17 +139,20 @@ If a key/credential is missing, that agent silently uses its stub, so the cockpi
 | Judging dimension | Where it's earned |
 |---|---|
 | **Agent Overview** | 8 agents + orchestrator, one file each (`backend/app/agents/`) |
-| **Autonomy & Decision-Making** | Roles attributes speakers; Structuring maps fields; **Verifier** self-checks evidence↔note alignment; Considerations ranks differentials |
+| **Autonomy & Decision-Making** | Roles attributes speakers; **Verifier** self-checks evidence↔note alignment and **triggers the reconcile loop** (re-query → re-verify) when it's weak; Evidence picks its own retrieval strategy (tiered, on-topic-gated); the LLM layer self-repairs its own malformed JSON |
 | **Actions & Tool Use** | AWS Transcribe (+ clinical vocab), Claude via the Vercel AI Gateway (Nova fallback), Exa, **AWS DynamoDB** (the miatec staging write) — real APIs taking real actions |
 | **Orchestration** | one `StateGraph` in `graph.py` — native `interrupt()` + checkpointer + **two confidence-driven gates** (roles, verifier) |
 | **Human-in-the-Loop** | `/roles` speaker confirm/swap + `/approve` gate; nothing writes until the doctor approves |
-| **Failure Handling** | low-confidence transcript masking, low-confidence role → review, **verifier caution branch**, visible retries, "no strong evidence found", write-gate validation |
+| **Failure Handling** | low-confidence transcript masking, low-confidence role → review, **verifier reconcile loop**, visible retries (LLM, Exa, **Transcribe**), **JSON self-repair** (the model fixes its own truncated output), "no strong evidence found", per-session HITL locks, write-gate validation, idempotent retryable write |
 | **Demo & Presentation** | the live cockpit (SSE) — every agent narrates its step + decision; records well |
 
 Failure-handling beats already wired into the live system: low-confidence transcript segments masked
 before structuring, a low-confidence **role** assignment routed to the human gate, the **Verifier**
-catching evidence that doesn't support the note (→ Considerations hedge), visible LLM/Exa retries, and
-Evidence returning "no strong evidence found" instead of a hallucinated citation.
+catching evidence that doesn't support the note (→ reconcile re-query, then Considerations hedges if
+still weak), visible LLM/Exa/Transcribe retries, **JSON self-repair** (the model is shown its own
+broken output + the parse error and corrects it), Evidence returning "no strong evidence found"
+instead of a hallucinated citation, per-session locks on the HITL endpoints, and a write that is
+idempotency-keyed so a failed attempt is safely retryable from the UI.
 
 ## Deploy — live
 

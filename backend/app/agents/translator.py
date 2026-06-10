@@ -99,26 +99,37 @@ async def run_translate(state: dict) -> dict:
 
 
 async def _translate_live(session_id: str, texts: list) -> list:
-    """Translate in batches with visible progress; each batch is retried before the agent gives up."""
-    out: list = []
-    total = len(texts)
-    for start in range(0, total, _BATCH):
-        chunk = texts[start:start + _BATCH]
-        batch_no = start // _BATCH + 1
+    """Translate all batches CONCURRENTLY (each with its own visible retry) and reassemble in order.
+
+    A 70-turn consult is ~3 batches; running them in parallel cuts translation wall-clock to one
+    batch's latency. Progress still narrates per batch as each lands, so the cockpit stays alive.
+    """
+    chunks = [texts[s:s + _BATCH] for s in range(0, len(texts), _BATCH)]
+    if len(chunks) > 1:
+        await publish(session_id, {"agent": AGENT, "status": "running",
+                                   "step": f"Translating {len(texts)} turns in {len(chunks)} parallel batches…"})
+    done_count = 0
+
+    async def one(i: int, chunk: list) -> list:
+        nonlocal done_count
         result = await call_with_retry(
             session_id, AGENT, lambda c=chunk: _translate_batch(c),
-            step=f"translation batch {batch_no}",
+            step=f"translation batch {i + 1}",
         )
-        out.extend(result)
+        done_count += 1
         await publish(session_id, {"agent": AGENT, "status": "running",
-                                   "step": f"Translating… {min(start + _BATCH, total)}/{total} turns"})
-    return out
+                                   "step": f"Translating… batch {done_count}/{len(chunks)} done"})
+        return result
+
+    results = await asyncio.gather(*(one(i, c) for i, c in enumerate(chunks)))
+    return [t for r in results for t in r]
 
 
 def _translate_batch(chunk: list) -> list:
     numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(chunk))
     # ~25 short turns ≈ well under 1k output tokens; generous budget so the JSON always closes.
-    data = claude_json(_SYSTEM, numbered, max_tokens=2500, temperature=0)
+    data = claude_json(_SYSTEM, numbered, max_tokens=2500, temperature=0,
+                       fast=True)  # translation is mechanical — fast tier, batches run in parallel
     items = data.get("t") if isinstance(data, dict) else None
     if not isinstance(items, list) or len(items) != len(chunk):
         raise ValueError(f"expected {len(chunk)} translations, got {len(items) if isinstance(items, list) else 'none'}")

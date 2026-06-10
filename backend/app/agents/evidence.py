@@ -88,6 +88,43 @@ async def run_evidence(state: dict) -> dict:
     return {"evidence": hits}
 
 
+async def run_evidence_requery(state: dict, refined_query: str) -> dict:
+    """Reconcile loop: the Verifier judged the evidence weak → search AGAIN with a refined,
+    assessment-focused query and merge new sources in (deduped by URL, append-only so existing card
+    indices stay valid). Returns {} when Exa is unavailable or nothing new surfaces — the caller
+    decides what that means. Capped at 8 total cards so the panel stays legible.
+    """
+    session_id = state["session_id"]
+    existing = list(state.get("evidence", []) or [])
+    if not (exa_configured() and refined_query):
+        return {}
+
+    await publish(session_id, {"agent": AGENT, "status": "running",
+                               "step": f"Reconcile: re-querying Exa — “{refined_query[:60]}…”"})
+    try:
+        hits, strategy = await call_with_retry(session_id, AGENT,
+                                               lambda: _search_exa_tiered(refined_query),
+                                               step="Exa reconcile re-query")
+    except Exception as exc:  # noqa: BLE001 — retries exhausted → keep what we have
+        await publish(session_id, {"agent": AGENT, "status": "retry", "error": str(exc),
+                                   "step": "Reconcile re-query unavailable — keeping the original evidence"})
+        return {}
+
+    seen = {e.get("url") for e in existing}
+    fresh = [h for h in hits if h["url"] not in seen][:max(0, 8 - len(existing))]
+    if not fresh:
+        await publish(session_id, {"agent": AGENT, "status": "running",
+                                   "step": "Reconcile re-query found no new sources — keeping the original evidence"})
+        return {}
+
+    merged = existing + fresh
+    await publish(session_id, {"agent": AGENT, "status": "done", "evidence": merged,
+                               "query": refined_query,
+                               "summary": f"+{len(fresh)} source(s) from the reconcile re-query · {len(merged)} total",
+                               "reason": strategy, "degraded": False})
+    return {"evidence": merged}
+
+
 def _build_query(note: dict) -> str:
     cc = note.get("chief_complaint", "")
     ros = note.get("review_of_systems", []) or []

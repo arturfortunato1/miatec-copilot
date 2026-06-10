@@ -40,7 +40,8 @@ def claude_configured() -> bool:
     return gateway_configured() or anthropic_configured() or bedrock_configured()
 
 
-def claude_messages(system: str, messages: list, max_tokens: int = 1024, temperature: float = 0.2) -> str:
+def claude_messages(system: str, messages: list, max_tokens: int = 1024, temperature: float = 0.2,
+                    fast: bool = False) -> str:
     """Call the LLM → concatenated text, FALLING THROUGH providers on failure.
 
     Order: Vercel AI Gateway → Anthropic API → Amazon Bedrock (Nova). The Gateway is preferred (it's the
@@ -48,41 +49,65 @@ def claude_messages(system: str, messages: list, max_tokens: int = 1024, tempera
     credits — we fall through to **Bedrock Nova** (free, runs on AWS) so the agents keep working. Same
     key can stay set: add Gateway credits and it's used automatically; without them, Nova carries the
     demo. Each provider raises on failure and we try the next; the last error surfaces if all fail.
+
+    `fast=True` routes to the fast/cheap tier (Haiku by default) — used by the mechanical agents
+    (Translate, Roles, Verifier) so the pipeline's wall-clock stays demo-friendly while the clinically
+    deep agents (Structuring, Considerations) keep the full model.
     """
     last_exc = None
     if gateway_configured():
         try:
-            return _via_vercel_gateway(system, messages, max_tokens, temperature)
+            return _via_vercel_gateway(system, messages, max_tokens, temperature, fast)
         except Exception as exc:  # noqa: BLE001 — gateway blocked/down → fall through to the next provider
             last_exc = exc
     if anthropic_configured():
         try:
-            return _via_anthropic(system, messages, max_tokens, temperature)
+            return _via_anthropic(system, messages, max_tokens, temperature, fast)
         except Exception as exc:  # noqa: BLE001
             last_exc = exc
     if bedrock_configured():
-        return _via_bedrock(system, messages, max_tokens, temperature)
+        return _via_bedrock(system, messages, max_tokens, temperature, fast)
     if last_exc is not None:
         raise last_exc
     raise RuntimeError("no LLM provider configured (set AI_GATEWAY_API_KEY, ANTHROPIC_API_KEY, or BEDROCK_MODEL_ID)")
 
 
-def claude_json(system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2) -> Any:
+def claude_json(system: str, user: str, max_tokens: int = 1500, temperature: float = 0.2,
+                fast: bool = False) -> Any:
     """Ask the LLM for strict JSON, strip any code fences, parse and return it (dict or list).
 
     `temperature` is threaded through so callers can pin it (e.g. Considerations uses 0 to cut Nova's
     run-to-run ranking variance).
+
+    Self-repair: if the output doesn't parse (truncated mid-string, stray prose, unbalanced braces),
+    the model is shown its OWN broken output plus the parser error and asked to re-emit valid JSON —
+    one bounded corrective pass before the error propagates to the caller's retry/fallback chain.
     """
-    text = claude_messages(system, [{"role": "user", "content": user}],
-                           max_tokens=max_tokens, temperature=temperature).strip()
+    text = _strip_fences(claude_messages(system, [{"role": "user", "content": user}],
+                                         max_tokens=max_tokens, temperature=temperature, fast=fast))
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as err:
+        repaired = _strip_fences(claude_messages(
+            "You repair malformed JSON. Output ONLY the corrected, strictly valid JSON document — "
+            "no prose, no code fences. Preserve the content; if the input is truncated, close it "
+            "minimally without inventing new data.",
+            [{"role": "user", "content": f"This JSON failed to parse ({err}):\n{text[:6000]}"}],
+            max_tokens=max_tokens, temperature=0, fast=True))
+        return json.loads(repaired)
+
+
+def _strip_fences(text: str) -> str:
+    text = text.strip()
     if text.startswith("```"):
         text = text.strip("`")
         if text.lower().startswith("json"):
             text = text[4:]
-    return json.loads(text)
+    return text.strip()
 
 
-def _via_vercel_gateway(system: str, messages: list, max_tokens: int, temperature: float) -> str:
+def _via_vercel_gateway(system: str, messages: list, max_tokens: int, temperature: float,
+                        fast: bool = False) -> str:
     """Route through the Vercel AI Gateway's OpenAI-compatible endpoint. One `creator/model-name`
     string (GATEWAY_MODEL, e.g. anthropic/claude-opus-4.8) picks the provider; every call is visible
     in the Vercel AI Gateway dashboard — the demoable proof of the Vercel integration.
@@ -90,11 +115,13 @@ def _via_vercel_gateway(system: str, messages: list, max_tokens: int, temperatur
     from openai import OpenAI  # lazy
     cli = OpenAI(api_key=os.getenv("AI_GATEWAY_API_KEY"),
                  base_url="https://ai-gateway.vercel.sh/v1")  # OpenAI path — keep the /v1
+    model = (os.getenv("GATEWAY_MODEL_FAST", "anthropic/claude-haiku-4.5") if fast
+             else os.getenv("GATEWAY_MODEL", "anthropic/claude-sonnet-4.6"))  # creator/model-name id
     # Our messages are already {"role": ..., "content": "<str>"}; fold the system prompt in as a
     # leading system message (the OpenAI chat shape).
     oai_messages = ([{"role": "system", "content": system}] if system else []) + messages
     resp = cli.chat.completions.create(
-        model=os.getenv("GATEWAY_MODEL", "anthropic/claude-sonnet-4.6"),  # full creator/model-name id
+        model=model,
         messages=oai_messages,
         max_tokens=max_tokens,
         temperature=temperature,
@@ -102,11 +129,13 @@ def _via_vercel_gateway(system: str, messages: list, max_tokens: int, temperatur
     return resp.choices[0].message.content or ""
 
 
-def _via_anthropic(system: str, messages: list, max_tokens: int, temperature: float) -> str:
+def _via_anthropic(system: str, messages: list, max_tokens: int, temperature: float,
+                   fast: bool = False) -> str:
     import anthropic  # lazy
     cli = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY (+ optional ANTHROPIC_BASE_URL) from env
     resp = cli.messages.create(
-        model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+        model=(os.getenv("ANTHROPIC_MODEL_FAST", "claude-haiku-4-5") if fast
+               else os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")),
         system=system,
         messages=messages,
         max_tokens=max_tokens,
@@ -115,11 +144,12 @@ def _via_anthropic(system: str, messages: list, max_tokens: int, temperature: fl
     return "".join(block.text for block in resp.content if block.type == "text")
 
 
-def _via_bedrock(system: str, messages: list, max_tokens: int, temperature: float) -> str:
+def _via_bedrock(system: str, messages: list, max_tokens: int, temperature: float,
+                 fast: bool = False) -> str:
     # Convert Anthropic-style messages ({"content": "<str>"}) to Bedrock Converse content blocks.
     converse_messages = [{"role": m["role"], "content": [{"text": m["content"]}]} for m in messages]
     kwargs = {
-        "modelId": os.environ["BEDROCK_MODEL_ID"],
+        "modelId": ((fast and os.getenv("BEDROCK_MODEL_ID_FAST")) or os.environ["BEDROCK_MODEL_ID"]),
         "messages": converse_messages,
         "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
     }
