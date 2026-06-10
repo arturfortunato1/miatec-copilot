@@ -5,14 +5,15 @@ human-in-the-loop interrupt (`interrupt_before=["record"]`) backed by a `MemoryS
 keyed by `thread_id = session_id`. `/ingest` runs the graph to the approval interrupt; `/write`
 resumes it (`graph.ainvoke(None, config)`) so the irreversible Record write only fires after approval.
 
-Two conditional edges make the graph self-aware. After Roles, low-confidence speaker attribution is
-routed through a review path before structuring. After the Verifier — which cross-checks the retrieved
-evidence against the note's assessment — weak or contradicting evidence is routed through a reconcile
-path that makes Considerations hedge. The graph itself decides *when to ask for help*. Show THIS graph
-on the orchestration slide; the entire loop (including the pause) lives in one compiled artifact.
+Two conditional edges route on the agents' own confidence signals. After Roles, low-confidence
+speaker attribution is routed through a review path before structuring. After the Verifier — which
+cross-checks the retrieved evidence against the note's assessment — weak or contradicting evidence is
+routed through a reconcile path that makes Considerations hedge. Routing is decided by the scores the
+agents emit, so the system asks for help exactly when it's unsure. Show THIS graph on the
+orchestration slide; the entire loop (including the pause) lives in one compiled artifact.
 
-    START → scribe → roles ─(needs_review)─► roles_review ─┐
-                              └──────(confident)───────────► structuring → evidence → verifier
+    START → scribe → translate → roles ─(needs_review)─► roles_review ─┐
+                                   └──────(confident)──────────────────► structuring → evidence → verifier
        verifier ─(weak/contradicting evidence)─► reconcile ─┐
                  └──────────(evidence supports)─────────────► considerations
                                  → ⏸ approval gate (interrupt_before record) → record → END
@@ -25,6 +26,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 
 from app.agents.scribe import run_scribe
+from app.agents.translator import run_translate
 from app.agents.roles import run_roles
 from app.agents.structuring import run_structuring
 from app.agents.evidence import run_evidence
@@ -98,6 +100,7 @@ def _route_after_verify(state: dict) -> str:
 def build_graph():
     g = StateGraph(State)
     g.add_node("scribe", run_scribe)
+    g.add_node("translate", run_translate)
     g.add_node("roles", run_roles)
     g.add_node("roles_review", run_roles_review)
     g.add_node("structuring", run_structuring)
@@ -108,7 +111,8 @@ def build_graph():
     g.add_node("record", run_record)
 
     g.add_edge(START, "scribe")
-    g.add_edge("scribe", "roles")                 # diarized spk_0/spk_1 → assign doctor/patient
+    g.add_edge("scribe", "translate")             # pt-BR capture → clinical-English normalization
+    g.add_edge("translate", "roles")              # diarized spk_0/spk_1 → assign doctor/patient
     g.add_conditional_edges("roles", _route_after_roles,
                             {"review": "roles_review", "ok": "structuring"})
     g.add_edge("roles_review", "structuring")

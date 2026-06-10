@@ -5,7 +5,7 @@ constructing ClinicalNote(**data) so bad shapes raise instead of leaking. Missin
 "not documented", never invented. Scores under: Autonomy & Decision-Making.
 
 Quality hardening (the real audio came back ~34% low-confidence):
-- **Mask** sub-0.7 turns as "[trecho inaudível]" before the LLM sees them, so it reasons over gaps
+- **Mask** sub-0.7 turns as "[inaudible]" before the LLM sees them, so it reasons over gaps
   instead of guessing from noise ("garbage in, garbage out" defence).
 - **Tell the model the signal quality** (role-attribution confidence + how many turns are unreliable)
   so it hedges instead of inventing.
@@ -27,22 +27,22 @@ AGENT = "structuring"
 _LOW_CONF = 0.7
 
 _SYSTEM = (
-    "You are a clinical scribe for a Brazilian consultation. Convert the transcript into a SOAP "
-    "clinical note as STRICT JSON with exactly these keys: chief_complaint (string), hpi (string), "
-    "review_of_systems (array of strings), vitals (object with bp, hr, temp — string or null), "
-    "current_medications (array of strings), allergies (array of strings), assessment (string), "
-    "plan (string). Write the clinical content in pt-BR. For anything not stated in the transcript "
-    'use "not documented" for strings, null for vitals fields, and [] for arrays — never invent.\n'
-    "Convenções (pt-BR): use terminologia médica brasileira e nomes de medicamentos em pt-BR "
-    '(ex.: "losartana", não "losartan"). chief_complaint = queixa principal em uma frase curta; '
-    "hpi = história da doença atual (início, evolução, sintomas associados); assessment = hipótese/"
-    "avaliação clínica; plan = conduta (exames, prescrições, encaminhamentos). Falas marcadas como "
-    '"[trecho inaudível]" são ruído de transcrição — raciocine em torno delas, nunca preencha o que '
-    "não foi dito.\n"
-    'Exemplo de formato — para "Doutor, estou com dor no peito há um dia e tomo losartana" → '
-    '{"chief_complaint":"Dor torácica há 1 dia","hpi":"Paciente refere dor torácica iniciada há 1 '
-    'dia.","review_of_systems":["Cardiovascular: dor torácica"],"vitals":{"bp":null,"hr":null,'
-    '"temp":null},"current_medications":["Losartana"],"allergies":[],"assessment":"not documented",'
+    "You are a clinical scribe for a consultation (captured in Brazilian Portuguese and already "
+    "translated to English). Convert the transcript into a SOAP clinical note as STRICT JSON with "
+    "exactly these keys: chief_complaint (string), hpi (string), review_of_systems (array of strings), "
+    "vitals (object with bp, hr, temp — string or null), current_medications (array of strings), "
+    "allergies (array of strings), assessment (string), plan (string). Write ALL clinical content in "
+    'clear clinical ENGLISH. For anything not stated in the transcript use "not documented" for '
+    "strings, null for vitals fields, and [] for arrays — never invent.\n"
+    'Conventions: use international English drug names ("losartan", not "losartana"). chief_complaint '
+    "= the presenting complaint in one short phrase; hpi = history of present illness (onset, course, "
+    "associated symptoms); assessment = the working clinical impression; plan = the conduct (tests, "
+    'prescriptions, referrals). Turns marked "[inaudible]" are transcription noise — reason around '
+    "them, never fill in what was not said.\n"
+    'Format example — for "Doctor, I\'ve had chest pain for a day and I take losartan" → '
+    '{"chief_complaint":"Chest pain for 1 day","hpi":"Patient reports chest pain that began 1 day '
+    'ago.","review_of_systems":["Cardiovascular: chest pain"],"vitals":{"bp":null,"hr":null,'
+    '"temp":null},"current_medications":["Losartan"],"allergies":[],"assessment":"not documented",'
     '"plan":"not documented"}.\n'
     "Output ONLY the JSON object: no prose, no code fences."
 )
@@ -54,7 +54,8 @@ async def run_structuring(state: dict) -> dict:
                                "step": "Mapping the role-labeled transcript into SOAP fields…"})
 
     transcript = state.get("transcript", [])
-    low_conf = [seg["text"] for seg in transcript if seg.get("confidence", 1.0) < _LOW_CONF]
+    low_conf = [seg.get("text_en") or seg["text"]
+                for seg in transcript if seg.get("confidence", 1.0) < _LOW_CONF]
     user_content = _build_prompt(transcript, state.get("roles", {}) or {})
 
     note_dict = None
@@ -72,16 +73,16 @@ async def run_structuring(state: dict) -> dict:
     if used_stub:
         await asyncio.sleep(0.8)  # simulate latency for the stub path
         note_dict = ClinicalNote(
-            chief_complaint="Dor torácica e dispneia, início há 1 dia",
-            hpi="Paciente refere dor torácica iniciada ontem, com irradiação para o braço esquerdo e falta de ar.",
+            chief_complaint="Chest pain and dyspnea, onset 1 day ago",
+            hpi="Patient reports chest pain that began yesterday, radiating to the left arm, with shortness of breath.",
             review_of_systems=[
-                "Cardiovascular: dor torácica com irradiação para MSE",
-                "Respiratório: dispneia",
+                "Cardiovascular: chest pain radiating to the left arm",
+                "Respiratory: dyspnea",
             ],
-            current_medications=["Losartana"],
+            current_medications=["Losartan"],
             allergies=[],
             assessment="not documented",
-            plan="Solicitar ECG e marcadores cardíacos (troponina).",
+            plan="Order ECG and cardiac markers (troponin).",
         ).model_dump()
 
     # Confidence flags come from Scribe, not the model.
@@ -98,27 +99,27 @@ async def run_structuring(state: dict) -> dict:
 
 
 def _build_prompt(transcript: list, roles: dict) -> str:
-    """Render the transcript with low-confidence turns masked, prefixed by an audio-quality briefing."""
+    """Render the (English) transcript with low-confidence turns masked, plus an audio-quality briefing."""
     lines = []
     for s in transcript:
         spk = s.get("speaker", "?")
         conf = s.get("confidence", 1.0)
         if conf < _LOW_CONF:
-            lines.append(f"{spk}: [trecho inaudível — conf {round(conf * 100)}%]")
+            lines.append(f"{spk}: [inaudible — conf {round(conf * 100)}%]")
         else:
-            lines.append(f'{spk}: {s.get("text", "")}')
+            lines.append(f'{spk}: {s.get("text_en") or s.get("text", "")}')
     rendered = "\n".join(lines)
 
     total = len(transcript)
     n_low = sum(1 for s in transcript if s.get("confidence", 1.0) < _LOW_CONF)
     rconf = round(float(roles.get("confidence", 0.0)) * 100)
-    role_flag = " (BAIXA — confirme os interlocutores)" if roles.get("needs_review") else ""
+    role_flag = " (LOW — confirm the speakers)" if roles.get("needs_review") else ""
     briefing = (
-        "Contexto de qualidade do áudio (use para calibrar sua confiança):\n"
-        f"- Confiança da atribuição médico/paciente: {rconf}%{role_flag}\n"
-        f"- {n_low} de {total} falas vieram com baixa confiança de transcrição e estão marcadas como "
-        "[trecho inaudível]; não invente o conteúdo delas.\n\n"
-        f"Transcrição:\n{rendered}"
+        "Audio-quality context (use it to calibrate your confidence):\n"
+        f"- Doctor/patient attribution confidence: {rconf}%{role_flag}\n"
+        f"- {n_low} of {total} turns came back with low transcription confidence and are masked as "
+        "[inaudible]; never invent their content.\n\n"
+        f"Transcript:\n{rendered}"
     )
     return briefing
 

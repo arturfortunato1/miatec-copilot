@@ -19,25 +19,34 @@ Open http://localhost:8000/docs for the interactive OpenAPI UI.
 
 | Method | Path | What it does |
 |---|---|---|
-| POST | `/ingest` | Runs Scribe → Structuring → Evidence → Considerations, pauses at the HITL gate |
-| GET | `/stream/{session}` | SSE — agents lighting up live (feed the cockpit) |
-| GET | `/state/{session}` | Current encounter state (note, evidence, considerations) |
-| POST | `/approve` | Doctor's edited + approved note (+ dismissed considerations); returns a miatec **dry-run preview** |
-| POST | `/write/{session}` | Record agent writes the approved note into miatec |
+| POST | `/ingest` | Kicks off the graph **in the background** (Scribe → Roles → Structuring → Evidence → Verifier → Considerations) and returns immediately; the run pauses at the HITL gate |
+| GET | `/stream/{session}` | SSE — agents lighting up live (feeds the cockpit; 15s pings) |
+| GET | `/state/{session}` | Current encounter state (transcript, note, evidence, verification, considerations) |
+| POST | `/roles` | HITL speaker correction — confirm or swap doctor↔patient; re-derives the note |
+| POST | `/approve` | Applies the doctor's edits + approval into the checkpoint — nothing writes yet |
+| POST | `/write/{session}` | Resumes past the interrupt — the Record agent writes the approved note into miatec |
+| GET | `/health` | Liveness (used by the container healthcheck) |
 
-## Where to plug real APIs
+## The agents — real integrations, stub fallbacks
 
-Every agent ships a runnable stub returning canned pt-BR data. Search **`TODO(real)`** and replace:
+Every agent runs its real integration when keys/credentials are present, and silently falls back to a
+runnable stub (canned pt-BR data) when they aren't — so the loop always plays:
 
-| File | Real integration |
+| File | Live integration |
 |---|---|
-| `app/agents/scribe.py` | AWS Transcribe (pt-BR, speaker labels) |
-| `app/agents/structuring.py` | Claude tool-calling + Pydantic validation |
-| `app/agents/evidence.py` | Exa search + contents |
-| `app/agents/considerations.py` | Claude reasoning over note + evidence |
-| `app/agents/record.py` | miatec REST (idempotency key + retry) |
+| `app/agents/scribe.py` | AWS Transcribe batch (pt-BR, diarization, clinical custom vocabulary) |
+| `app/agents/roles.py` | LLM doctor/patient attribution + confidence (low → review gate) |
+| `app/agents/structuring.py` | LLM strict-JSON SOAP, Pydantic-validated; masks low-confidence turns first |
+| `app/agents/evidence.py` | Exa `search_and_contents` — real guideline citations |
+| `app/agents/verifier.py` | LLM evidence↔note alignment check (low → caution branch) |
+| `app/agents/considerations.py` | LLM ranked differentials, hedging on weak signal |
+| `app/agents/record.py` | miatec encounter mapping — the direct REST write is the one remaining `TODO(real)` (entry via the miatec app frontend; see `docs/INTEGRATIONS.md`) |
+
+LLM = one interface (`app/llm.py`): **Vercel AI Gateway → Anthropic API → Bedrock Nova → stub**.
 
 `app/graph.py` is the orchestration artifact — screenshot it for the slide. `app/schema.py` is the
 typed contract every agent reads/writes.
 
-> Targets Python 3.9+ so it runs on this machine; the build plan recommends 3.12 for the deploy image.
+> Targets Python 3.9+ locally; the `Dockerfile` deploy image runs **3.12 with a single uvicorn worker**
+> (in-process checkpointer + SSE bus). That image is what's live on ECS Fargate — deployment details in
+> [`docs/INTEGRATIONS.md`](../docs/INTEGRATIONS.md).

@@ -34,9 +34,9 @@ AUTH_DOMAINS = [
 
 # Stubbed authoritative hits so the loop runs without an Exa key.
 _MOCK_EVIDENCE = [
-    {"claim": "Dor torácica com irradiação para MSE + fatores de risco exige descartar SCA com ECG e troponina.",
-     "source": "Diretriz SBC de Síndromes Coronarianas Agudas", "url": "https://www.portal.cardiol.br/", "score": 0.71},
-    {"claim": "Losartana (BRA) é anti-hipertensivo; hipertensão é fator de risco cardiovascular relevante.",
+    {"claim": "Chest pain radiating to the left arm with risk factors requires ruling out ACS with ECG and troponin.",
+     "source": "SBC Guideline on Acute Coronary Syndromes", "url": "https://www.portal.cardiol.br/", "score": 0.71},
+    {"claim": "Losartan (an ARB) is an antihypertensive; hypertension is a relevant cardiovascular risk factor.",
      "source": "UpToDate — Hypertension and cardiovascular risk", "url": "https://www.uptodate.com/", "score": 0.52},
 ]
 
@@ -91,7 +91,7 @@ def _build_query(note: dict) -> str:
     focus = "; ".join(p for p in parts if p and p != "not documented").strip("; ").strip()
     if not focus:
         return ""
-    return f"diretrizes clínicas e evidências médicas para: {focus}"
+    return f"clinical guidelines and medical evidence for: {focus}"
 
 
 def _search_exa(query: str) -> list:

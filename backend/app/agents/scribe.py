@@ -62,7 +62,7 @@ async def _stream_transcript(session_id: str, segments: list, audio_name: str) -
     for seg in segments:
         shown.append(seg)
         await publish(session_id, {"agent": AGENT, "status": "streaming", "audio": audio_name,
-                                   "step": f"Transcrevendo a consulta… {len(shown)}/{total} falas",
+                                   "step": f"Transcribing the consultation… {len(shown)}/{total} turns",
                                    "transcript": list(shown)})
         await asyncio.sleep(_STREAM_DELAY)
 

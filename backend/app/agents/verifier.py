@@ -30,7 +30,8 @@ _SYSTEM = (
     "that points elsewhere). Be strict: if the evidence does not actually corroborate the assessment, "
     "alignment should be low. Output ONLY JSON: "
     '{"alignment": <0..1>, "verdicts": [{"index": <int>, "stance": "supports|neutral|contradicts", '
-    '"note": "<short>"}], "concerns": ["<short>"], "summary": "<one sentence, pt-BR>"}.'
+    '"note": "<short, in English>"}], "concerns": ["<short, in English>"], '
+    '"summary": "<one sentence, in English>"}.'
 )
 
 
@@ -59,9 +60,9 @@ async def run_verifier(state: dict) -> dict:
             "alignment": 0.6 if evidence else 0.0,
             "verdicts": [{"index": i, "stance": "neutral", "note": "not assessed (no LLM)"}
                          for i in range(len(evidence))],
-            "concerns": [] if evidence else ["nenhuma evidência recuperada para corroborar a nota"],
-            "summary": ("Verificação automática indisponível; revise as evidências manualmente."
-                        if evidence else "Sem evidências para corroborar a nota."),
+            "concerns": [] if evidence else ["no evidence retrieved to corroborate the note"],
+            "summary": ("Automatic verification unavailable; review the evidence manually."
+                        if evidence else "No evidence available to corroborate the note."),
         }
 
     verification = _build(data, evidence, used_stub)

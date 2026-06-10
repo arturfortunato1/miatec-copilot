@@ -24,7 +24,7 @@ and answers, who gives the assessment and prescribes. LLMs are reliable at this 
 is imperfect. It emits a **mapping + confidence + one-line rationale** — a legible, auditable decision,
 not a hidden heuristic.
 
-`backend/app/agents/roles.py` · graph: `scribe → roles → structuring → evidence → considerations`
+`backend/app/agents/roles.py` · graph: `scribe → roles → structuring → evidence → verifier → considerations → ⏸ → record`
 
 ### B — Confidence gate + human-in-the-loop → the **assertiveness guarantee**
 You can't *prove* acoustic diarization is correct, so we don't pretend to — we **measure and gate**:

@@ -34,8 +34,8 @@ _SYSTEM = (
     "consultation transcript — rarely above 0.7 for one differential. If quality_context shows low "
     "role-attribution confidence, many unclear turns, or LOW evidence_alignment (the verifier found the "
     "evidence weakly supports the note), be MORE conservative: lower the confidences, prefer rule-out "
-    "('descartar') framing, and address any listed evidence_concerns. Put ALL reasoning inside the "
-    "'rationale' field (pt-BR). "
+    "framing, and address any listed evidence_concerns. Put ALL reasoning inside the 'rationale' field, "
+    "written in clear clinical ENGLISH (labels in English too). "
     "Output ONLY the JSON array: no prose, no code fences."
 )
 
@@ -65,14 +65,14 @@ async def run_considerations(state: dict) -> dict:
         await asyncio.sleep(0.7)  # simulate latency for the stub path
         refs = list(range(len(evidence)))
         considerations = [
-            {"label": "Síndrome coronariana aguda (descartar)",
-             "rationale": "Dor torácica com irradiação para braço esquerdo, dispneia e hipertensão em uso de losartana.",
+            {"label": "Acute coronary syndrome (rule out)",
+             "rationale": "Chest pain radiating to the left arm, dyspnea, and hypertension on losartan.",
              "confidence": 0.62, "evidence_refs": refs, "dismissed": False},
-            {"label": "Angina estável",
-             "rationale": "Dor possivelmente relacionada a esforço, sem critérios de instabilidade documentados.",
+            {"label": "Stable angina",
+             "rationale": "Pain possibly exertional, with no documented instability criteria.",
              "confidence": 0.21, "evidence_refs": refs[:1], "dismissed": False},
-            {"label": "Causa musculoesquelética",
-             "rationale": "Considerar se a investigação cardíaca for negativa.",
+            {"label": "Musculoskeletal cause",
+             "rationale": "Consider if the cardiac workup is negative.",
              "confidence": 0.12, "evidence_refs": [], "dismissed": False},
         ]
 

@@ -68,7 +68,7 @@ The state object is a single typed dict that flows through the LangGraph nodes. 
 - *Speed path:* **Dify Pro** (free 1-month sub provided) — low-code visual agent builder. Use it if you value speed over control, or to stand up a non-core agent fast.
 
 ### Backend
-- **Python 3.12 + FastAPI + Uvicorn**, deployed on **AWS App Runner** (simplest container deploy) or **ECS Fargate**. This satisfies the "deployed on AWS" finalist requirement with compute, not just API calls.
+- **Python 3.12 + FastAPI + Uvicorn**, deployed on **AWS ECS Fargate** (App Runner is SCP-blocked on the workshop account — and its 120s response cap would kill SSE). This satisfies the "deployed on AWS" finalist requirement with compute, not just API calls.
 - **Pydantic** for the clinical-note schema and hard validation.
 
 ### Frontend (the doctor cockpit)
@@ -208,7 +208,7 @@ The state object is a single typed dict that flows through the LangGraph nodes. 
 ## 10. Slide outline (.ppt/.keynote, visual & punchy)
 1. Title + one-liner.
 2. Problem: documentation burden / after-visit hours / burnout (one stat).
-3. **The agent system** — architecture diagram (6 agents + orchestrator).
+3. **The agent system** — architecture diagram (7 agents + orchestrator).
 4. **Embedded demo video.**
 5. Autonomy & tool use — what each agent decides + which real APIs it calls.
 6. Human-in-the-loop — the approval gate.

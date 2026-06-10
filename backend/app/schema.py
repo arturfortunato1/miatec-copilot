@@ -24,7 +24,8 @@ class AgentStatus(str, Enum):
 class TranscriptSegment(BaseModel):
     speaker: str                         # resolved role: "doctor" | "patient" | raw label (pre-Roles)
     speaker_label: Optional[str] = None  # raw diarization label from Transcribe (spk_0 / spk_1)
-    text: str
+    text: str                            # original utterance as captured (pt-BR)
+    text_en: Optional[str] = None        # clinical-English translation (Translate agent); None = untranslated
     confidence: float = 1.0              # drives failure handling (low-confidence flags)
     start: Optional[float] = None
     end: Optional[float] = None

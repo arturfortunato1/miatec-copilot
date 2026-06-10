@@ -76,18 +76,20 @@ def _summarize(roles: dict) -> tuple:
 
 
 _SYSTEM = (
-    "You are analyzing a diarized medical consultation in Portuguese. Speakers are labeled anonymously "
+    "You are analyzing a diarized medical consultation. Speakers are labeled anonymously "
     "(e.g. spk_0, spk_1). Decide which label is the CLINICIAN (doctor) and which is the PATIENT, using "
     "who takes the history and asks questions, who reports symptoms and answers, and who gives the "
     "assessment / prescribes / instructs. Output ONLY JSON: "
     '{"doctor_label": "<label>", "patient_label": "<label>", "confidence": <number 0..1>, '
-    '"rationale": "<one short sentence>"}.'
+    '"rationale": "<one short sentence, in English>"}.'
 )
 
 
 def _assign_roles_llm(transcript: list, labels: list) -> dict:
     turns = transcript[:_MAX_TURNS_FOR_LLM]
-    convo = "\n".join(f'{(s.get("speaker_label") or s.get("speaker"))}: {s.get("text", "")}' for s in turns)
+    convo = "\n".join(
+        f'{(s.get("speaker_label") or s.get("speaker"))}: {s.get("text_en") or s.get("text", "")}'
+        for s in turns)
     data = claude_json(_SYSTEM, f"Labels present: {labels}\n\nTranscript:\n{convo}", max_tokens=300)
 
     doctor = data.get("doctor_label")

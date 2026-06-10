@@ -3,7 +3,12 @@
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-export type TranscriptSegment = { speaker: string; text: string; confidence: number };
+export type TranscriptSegment = {
+  speaker: string;
+  text: string; // original utterance as captured (pt-BR)
+  text_en?: string | null; // clinical-English translation (Translate agent)
+  confidence: number;
+};
 export type Vitals = { bp: string | null; hr: string | null; temp: string | null };
 
 export type ClinicalNote = {

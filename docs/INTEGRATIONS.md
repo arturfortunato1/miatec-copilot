@@ -1,23 +1,33 @@
 # Integrations — chosen stack
 
-Decisions made during the build for wiring the real agents. Updated 2026-06-09.
+Decisions made during the build for wiring the real agents. Updated 2026-06-10.
 
-## LLM (Structuring + Considerations) → Amazon Nova on Bedrock, Claude as upgrade
-**Workshop constraint (probed empirically):** `ws-dont-modify-policy-0` allows Bedrock only for
-**Amazon's own models** and denies every third-party provider — Anthropic, Meta, Mistral, Cohere,
-DeepSeek — in all regions (us-east-1 / us-west-2 / ap-southeast-1). So:
-- **Active now:** **Amazon Nova Pro** via the Bedrock **Converse** API
-  (`BEDROCK_MODEL_ID=us.amazon.nova-pro-v1:0`) — runs on the workshop creds, AWS-sponsor-aligned, no extra key.
-- **Upgrade path:** set `ANTHROPIC_API_KEY` and `llm.py` automatically prefers **Claude via the direct
-  Anthropic API** (stronger clinical reasoning). Bedrock-Claude also works on any account that allows it.
-- **Resolution:** `llm.py` → Anthropic API if keyed → else Bedrock Converse (`BEDROCK_MODEL_ID`) → else stub.
-- **Env:** `ANTHROPIC_API_KEY` (optional, preferred) · `BEDROCK_MODEL_ID` (Nova) · `ANTHROPIC_MODEL` (default `claude-sonnet-4-6`).
-- **Code:** `backend/app/llm.py`, `agents/structuring.py`, `agents/considerations.py`.
+## LLM (Roles + Structuring + Verifier + Considerations) → one interface, three providers
+All four LLM agents call the same helpers (`claude_messages` / `claude_json` in `backend/app/llm.py`),
+which fall through on missing keys **and on runtime failure**:
+
+1. **Vercel AI Gateway** — the deployed primary. OpenAI-SDK-compatible endpoint
+   (`https://ai-gateway.vercel.sh/v1`); `AI_GATEWAY_API_KEY` + `GATEWAY_MODEL` (live:
+   `anthropic/claude-sonnet-4.6`; swap to `anthropic/claude-opus-4.8` for max quality at higher cost).
+   **Gotcha:** premium models (Sonnet/Opus) 403 while the gateway balance is *free* credit — an
+   anti-abuse guard that neither the Pro plan nor BYOK bypasses; purchasing gateway credit lifts it.
+2. **Anthropic API** direct — `ANTHROPIC_API_KEY` (+ `ANTHROPIC_MODEL`, default `claude-sonnet-4-6`).
+3. **Amazon Nova Pro** via the Bedrock **Converse** API (`BEDROCK_MODEL_ID=us.amazon.nova-pro-v1:0`).
+   **Workshop constraint (probed empirically):** `ws-dont-modify-policy-0` allows Bedrock only for
+   **Amazon's own models** and denies every third-party provider — Anthropic, Meta, Mistral, Cohere,
+   DeepSeek — in all regions. Nova is verified working from Fargate via the task role.
+4. **Stub** — canned pt-BR output, so the loop never breaks.
+
+- **Env:** `AI_GATEWAY_API_KEY` + `GATEWAY_MODEL` (preferred) · `ANTHROPIC_API_KEY` · `BEDROCK_MODEL_ID` (Nova).
+- **Code:** `backend/app/llm.py`, `agents/roles.py`, `agents/structuring.py`, `agents/verifier.py`, `agents/considerations.py`.
 
 ## Speech-to-text (Scribe) → AWS Transcribe (pt-BR)
 **AWS Transcribe batch**, `LanguageCode=pt-BR`, speaker labels. Batch on a clean clip is the reliable
 choice for the recorded demo (vs streaming). Audio lives in S3.
-- **Env:** AWS creds + region, `S3_AUDIO_BUCKET`.
+- **Custom vocabulary:** pt-BR clinical terms (meds, exams, conditions) boost accuracy —
+  `backend/app/vocab.py`; provision once with `python -m app.vocab` (`TRANSCRIBE_VOCABULARY_NAME`).
+- **Env:** AWS creds + region (or the Fargate task role), `S3_AUDIO_BUCKET`; `SCRIBE_CACHE=1` reuses
+  parsed transcripts under `.cache/scribe/`.
 - **Input:** `POST /ingest {"session_id": "...", "audio_ref": "s3://bucket/clip.wav"}` — a local path
   also works and is uploaded to `S3_AUDIO_BUCKET` first.
 - **Code:** `backend/app/agents/scribe.py` — **implemented**; falls back to a canned pt-BR transcript
@@ -30,16 +40,61 @@ human-in-the-loop confirm/swap (`POST /roles`, which re-derives the note). Produ
 dual-channel capture (`ChannelIdentification`). Full write-up + presentation framing:
 [`SPEAKER_ATTRIBUTION.md`](./SPEAKER_ATTRIBUTION.md).
 
-## miatec write (Record) → via the miatec app frontend (deferred)
-The approved encounter is entered into miatec through the **miatec app's own frontend**, not a backend
-REST call — for now ("fairly simple, leave for later"). The Record agent maps the `ClinicalNote` to
-the miatec encounter shape and marks it ready for entry; the direct REST write (idempotency key +
-retry) is scaffolded in `record.py` as a later enhancement.
-- **TODO:** confirm the miatec frontend entry point + the exact fields to map; wire the handoff
-  (e.g. deep-link/prefill into the miatec app, or a small REST endpoint if one becomes available).
+## miatec write (Record) → DynamoDB staging store (real write)
+miatec exposes no public REST API yet, so the **Record agent performs a real write** to a DynamoDB
+staging table (`MIATEC_TABLE`, default `miatec-encounters`): a **conditional `put_item`** with the
+idempotency key (`{session_id}:record`) as the partition key — `attribute_not_exists(pk)` means a
+retry after a timeout can never double-write; a matched key is reported as idempotent success. The
+item carries the approved note, the non-dismissed considerations, and the evidence↔note alignment.
+Entry into the miatec app follows from the staged record; a direct miatec REST write slots into
+`record.py` unchanged once an API exists.
+- **Provision once:** `scripts/provision_miatec_table.sh` — creates the table (on-demand billing),
+  grants `dynamodb:PutItem/GetItem` to `miatecTaskRole`, and adds `MIATEC_TABLE` to the task def.
+- **Env:** `MIATEC_TABLE` + AWS creds (or the Fargate task role). Unset → a clearly labeled
+  *simulated* write (`degraded: true`), so the loop still plays.
+- **Code:** `backend/app/agents/record.py`.
 
 ## Evidence → Exa (separate key, not AWS)
-- **Env:** `EXA_API_KEY`. **Code:** `backend/app/agents/evidence.py` — search `TODO(real)`.
+**Implemented** — `search_and_contents` (`type=auto`, highlights) over a query built from the note's
+chief complaint + review of systems; returns cited claims, or **"no strong evidence found"** instead of
+a hallucinated citation. Unkeyed it falls back to canned authoritative hits so the loop still plays.
+- **Env:** `EXA_API_KEY`. **Code:** `backend/app/agents/evidence.py`.
+
+---
+
+## Deployment — the live stack
+
+Backend on **AWS ECS Fargate**, HTTPS via **CloudFront** (`https://d1g2v6wxyaxkjl.cloudfront.net`),
+frontend on **Vercel** (`https://frontend-jose-fortunatos-projects.vercel.app`), LLM through the
+**Vercel AI Gateway**. Verified end-to-end: a live `/ingest` produced a 69-turn real transcript.
+
+- **Compute:** ECS cluster `miatec`, service `miatec-copilot` (`us-west-2`); image from ECR, built by
+  `backend/Dockerfile` (Python 3.12, non-root). **desired-count 1 + `uvicorn --workers 1`** — the
+  MemorySaver checkpointer and the SSE bus are in-process; scaling out needs Redis/Postgres first.
+- **Credentials:** the task role carries Transcribe + S3 (no static AWS keys in the container);
+  `AI_GATEWAY_API_KEY` / `EXA_API_KEY` are injected from Secrets Manager.
+- **HTTPS path:** CloudFront (caching disabled) → ALB (idle timeout raised to 900s for the SSE hold) →
+  task `:8000`. The CloudFront URL is the frontend's `NEXT_PUBLIC_API_URL`.
+- **CloudFront's 60s origin timeout vs a multi-minute run:** `POST /ingest` is **non-blocking** — it
+  spawns the graph as a background task and returns an empty `EncounterState` in under a second; the
+  cockpit follows along on `GET /stream` (SSE, 15s pings), and `/approve` + `/write` resume from the
+  checkpoint.
+- **Why not App Runner:** SCP-blocked on the workshop account — and its 120s response cap would kill
+  SSE anyway.
+- **Cold cache after redeploy:** a fresh task has an empty Scribe cache, so the first `/ingest` runs a
+  real multi-minute Transcribe job. Warm it once before demoing.
+
+**Redeploy after backend changes** (always `--platform linux/amd64` from Apple Silicon):
+
+```bash
+docker build --platform linux/amd64 --provenance=false -t miatec-copilot backend/
+# tag + push to the ECR repo `miatec-copilot`, then:
+aws ecs update-service --cluster miatec --service miatec-copilot --force-new-deployment
+aws ecs wait services-stable --cluster miatec --services miatec-copilot
+```
+
+**Frontend:** Vercel project `frontend`; set `NEXT_PUBLIC_API_URL` to the CloudFront URL. Disable
+Vercel **Deployment Protection** for public/judge access — it 401s anonymous visitors while on.
 
 ---
 
