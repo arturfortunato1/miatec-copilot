@@ -21,6 +21,50 @@ function roleData(speaker: string): "doctor" | "patient" | "other" {
   return "other";
 }
 
+/* ── Inline-editable transcript segment ──────────────────────────────────── */
+// Local edit state per segment: the doctor can fix transcription errors before approving.
+// Edits are annotations only — the SOAP note (not the raw transcript) is what writes to miatec.
+function SegmentText({ displayText, editable, segKey }: { displayText: string; editable: boolean; segKey: string }) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(displayText);
+  const [isEdited, setIsEdited] = useState(false);
+
+  // Reset when language toggles (segKey includes lang suffix) or new session
+  useEffect(() => { setValue(displayText); setIsEdited(false); setEditing(false); }, [segKey]);
+  // Sync when translation arrives before any edit
+  useEffect(() => { if (!isEdited) setValue(displayText); }, [displayText, isEdited]);
+
+  if (!editable) return <span className="txt">{displayText}</span>;
+
+  if (editing) {
+    return (
+      <textarea
+        className="txt seg-textarea"
+        autoFocus
+        value={value}
+        rows={Math.max(1, Math.ceil(value.length / 55))}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => { setEditing(false); if (value.trim() !== displayText.trim()) setIsEdited(true); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); setEditing(false); if (value.trim() !== displayText.trim()) setIsEdited(true); }
+          if (e.key === "Escape") { setEditing(false); if (!isEdited) setValue(displayText); }
+        }}
+      />
+    );
+  }
+
+  return (
+    <span
+      className={`txt seg-editable${isEdited ? " seg-edited" : ""}`}
+      onClick={() => setEditing(true)}
+      title="Click to edit"
+    >
+      {value}
+      {isEdited && <span className="seg-edit-badge">edited</span>}
+    </span>
+  );
+}
+
 /* ── Transcript + roles (the capture stage) ───────────────────────────────── */
 // The transcript streams in pt-BR (as captured). When the Translate agent finishes, a "rewriting"
 // wave cascades down the well: each line's Portuguese blurs away while its clinical English
@@ -36,6 +80,7 @@ export function TranscriptBody({
   busy,
   audioUrl,
   audioName,
+  editable,
 }: {
   transcript: TranscriptSegment[];
   roles: SpeakerRoles | null;
@@ -43,6 +88,7 @@ export function TranscriptBody({
   busy: boolean;
   audioUrl: string | null;
   audioName: string | null;
+  editable?: boolean;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [showOriginal, setShowOriginal] = useState(false);
@@ -134,6 +180,11 @@ export function TranscriptBody({
           )}
         </div>
       )}
+      {editable && (
+        <div className="transcript-edit-bar">
+          <span>✎ click any line to correct before approving</span>
+        </div>
+      )}
       <div ref={ref} className="scroll-area" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 14px 12px" }}>
         {transcript.length === 0 && <p className="panel-empty">listening…</p>}
         {transcript.map((seg, i) => {
@@ -141,17 +192,22 @@ export function TranscriptBody({
           const who = resolve(seg.speaker);
           const showEn = !!seg.text_en && !showOriginal;
           const order = waving.get(i);
+          const displayText = showEn ? (seg.text_en ?? seg.text) : seg.text;
           return (
             <div key={i} className={`turn ${low ? "low" : ""}`}>
               <span className="who" data-role={roleData(who)}>{who}</span>
-              {showEn && order !== undefined ? (
+              {showEn && order !== undefined && !editable ? (
                 <span className="txt rw" style={{ ["--d" as string]: `${order * WAVE_STAGGER_MS}ms` }}>
                   <span className="t-en">{seg.text_en}</span>
                   <span className="t-pt" aria-hidden>{seg.text}</span>
                   <span className="t-sweep" aria-hidden />
                 </span>
               ) : (
-                <span className="txt">{showEn ? seg.text_en : seg.text}</span>
+                <SegmentText
+                  displayText={displayText}
+                  editable={!!editable}
+                  segKey={`${i}-${showEn ? "en" : "pt"}`}
+                />
               )}
               <span className="conf">{pct(seg.confidence)}%{low ? " ⚠" : ""}</span>
             </div>
@@ -208,12 +264,17 @@ export function SoapBody({
 
   return (
     <>
+      {editable && (
+        <div className="soap-edit-bar">
+          <span>✎ all fields editable — changes go into the miatec record</span>
+        </div>
+      )}
       <div className="soap-grid">
         <SoapField label="Chief complaint" value={note.chief_complaint} span editable={editable} onChange={(val) => onChange({ ...note, chief_complaint: val })} />
         <SoapField label="History of present illness" value={note.hpi} span editable={editable} onChange={(val) => onChange({ ...note, hpi: val })} />
-        <SoapField label="Medications" value={meds} />
-        <SoapField label="Allergies" value={allergies} />
-        <SoapField label="Review of systems" value={ros} />
+        <SoapField label="Medications" value={meds} editable={editable} onChange={(val) => onChange({ ...note, current_medications: val.split(",").map((s) => s.trim()).filter(Boolean) })} />
+        <SoapField label="Allergies" value={allergies} editable={editable} onChange={(val) => onChange({ ...note, allergies: val.split(",").map((s) => s.trim()).filter(Boolean) })} />
+        <SoapField label="Review of systems" value={ros} editable={editable} onChange={(val) => onChange({ ...note, review_of_systems: val.split(";").map((s) => s.trim()).filter(Boolean) })} />
         <SoapField label="Vitals" value={vitals} />
         <SoapField label="Assessment" value={note.assessment} span editable={editable} onChange={(val) => onChange({ ...note, assessment: val })} />
         <SoapField label="Plan" value={note.plan} span editable={editable} onChange={(val) => onChange({ ...note, plan: val })} />

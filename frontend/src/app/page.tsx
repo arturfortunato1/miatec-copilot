@@ -197,7 +197,7 @@ export default function ControlRoom() {
               metric={dir.qualityScore != null ? { label: "signal", value: dir.qualityScore } : null}
               flush
             >
-              <TranscriptBody transcript={dir.transcript} roles={dir.roles} onSwap={onSwapRoles} busy={busy} audioUrl={audioUrl} audioName={dir.audio.name ?? null} />
+              <TranscriptBody transcript={dir.transcript} roles={dir.roles} onSwap={onSwapRoles} busy={busy} audioUrl={audioUrl} audioName={dir.audio.name ?? null} editable={gateOpen} />
             </Panel>
 
             <Panel
