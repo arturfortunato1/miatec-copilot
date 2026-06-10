@@ -52,11 +52,15 @@ _STREAM_PACING = float(os.getenv("SCRIBE_STREAM_PACING", "0.05"))
 _STREAM_CHUNK_MS = int(os.getenv("SCRIBE_STREAM_CHUNK_MS", "500"))
 _STREAM_PUBLISH_MS = int(os.getenv("SCRIBE_STREAM_PUBLISH_MS", "350"))
 # Demo hybrid: the real consult is ~9 min — too long to transcribe end-to-end live. So we live-stream
-# only the opening ~N seconds (real-time, for the "live capture" effect) while a fast batch job
+# only the OPENING ~_DEMO_SECONDS of audio (for the "live capture" effect) while a fast batch job
 # transcribes the WHOLE clip in the background; when batch lands, the full transcript reveals with the
-# existing line-by-line animation. Bounds the wait to the batch (~50s), not the audio's real length.
-# SCRIBE_DEMO_SECONDS=0 disables the hybrid (pure batch). Code: run_scribe.
-_DEMO_SECONDS = int(os.getenv("SCRIBE_DEMO_SECONDS", "30"))
+# existing line-by-line animation. ~150s of opening ≈ 20+ turns — a substantial live preview that
+# comfortably covers the background batch (~50s). Bounds the wait to the preview, not the audio's
+# length. SCRIBE_DEMO_SECONDS=0 disables the hybrid (pure batch). Code: run_scribe.
+_DEMO_SECONDS = int(os.getenv("SCRIBE_DEMO_SECONDS", "150"))
+# Expected batch-job wall time, only used to render the background "loading full transcript… N%"
+# indicator (AWS Transcribe batch exposes no real progress); clamps <100% until the job actually lands.
+_BATCH_EXPECTED_S = float(os.getenv("SCRIBE_BATCH_EXPECTED_S", "55"))
 
 # Canned pt-BR consult so the skeleton runs end-to-end without AWS wired up. Anonymous labels
 # (spk_0/spk_1) just like real diarization — the Roles agent assigns doctor/patient.
@@ -118,9 +122,22 @@ async def run_scribe(state: dict) -> dict:
                 try:
                     pcm = await asyncio.to_thread(_read_wav_pcm, stream_ref)
                     await asyncio.to_thread(client, "transcribe")  # warm the boto3 model off the hot path
+                    batch_started = time.monotonic()
                     batch_task = asyncio.create_task(asyncio.to_thread(_transcribe_batch_sync, audio_ref, vocab))
+
+                    # The preview's step line carries the background batch's progress so judges can see
+                    # the full transcript loading while they watch the opening stream in. Transcribe
+                    # batch has no real progress API → estimate from elapsed/expected, pinned <100% until
+                    # the job actually lands, then "ready ✓".
+                    def _batch_suffix():
+                        if batch_task.done():
+                            return " · full transcript ready ✓"
+                        pct = min(95, int((time.monotonic() - batch_started) / _BATCH_EXPECTED_S * 100))
+                        return f" · loading full transcript {pct}%"
+
                     try:
-                        await _transcribe_streaming(session_id, pcm, vocab, cap_seconds=_DEMO_SECONDS)
+                        await _transcribe_streaming(session_id, pcm, vocab,
+                                                    cap_seconds=_DEMO_SECONDS, status_suffix_fn=_batch_suffix)
                     except Exception as exc:  # noqa: BLE001 — preview is decorative; keep the batch going
                         await publish(session_id, {"agent": AGENT, "status": "running", "error": str(exc),
                                                    "step": "Live preview unavailable — finishing the full transcript"})
@@ -342,14 +359,16 @@ def _clean_segments(items: list) -> list:
 
 
 async def _transcribe_streaming(session_id: str, pcm: bytes, vocab=None,
-                                cap_seconds: int | None = None) -> list:
+                                cap_seconds: int | None = None, status_suffix_fn=None) -> list:
     """Open a live AWS Transcribe stream, feed it pre-read PCM in paced chunks, and publish turns as
     they finalize (progressive load). `pcm` is 16kHz mono s16le frames, already read + validated by
     _read_wav_pcm OFF the hot path — so it can't contend on S3 with a batch job running in parallel
     (that contention previously hung the read). Returns the cleaned segments; raises on failure. The
     streaming SDK is imported lazily so a missing dep never breaks app boot.
 
-    cap_seconds: feed only the first N seconds of audio, then end the stream (the demo preview window)."""
+    cap_seconds: feed only the first N seconds of audio, then end the stream (the demo preview window).
+    status_suffix_fn: optional () -> str appended to the step line — used to surface the background
+    batch's "loading full transcript… N%". A ticker refreshes it ~1/s even between finalized turns."""
     from amazon_transcribe.client import TranscribeStreamingClient
     from amazon_transcribe.handlers import TranscriptResultStreamHandler
 
@@ -369,8 +388,9 @@ async def _transcribe_streaming(session_id: str, pcm: bytes, vocab=None,
     async def _emit():
         last_pub[0] = time.monotonic()
         segs = _clean_segments(items)
+        suffix = status_suffix_fn() if status_suffix_fn else ""
         await publish(session_id, {"agent": AGENT, "status": "streaming",
-                                   "step": f"Transcribing live… {len(segs)} turns",
+                                   "step": f"Live transcript · {len(segs)} turns{suffix}",
                                    "transcript": segs})
 
     class _Handler(TranscriptResultStreamHandler):
@@ -411,7 +431,24 @@ async def _transcribe_streaming(session_id: str, pcm: bytes, vocab=None,
                 await asyncio.sleep(_STREAM_PACING)
         await stream.input_stream.end_stream()
 
-    await asyncio.gather(_writer(), _Handler(stream.output_stream).handle_events())
+    # A ticker keeps the step line (incl. the background batch's "loading… N%") refreshing ~1/s even
+    # when no new turn finalizes, so the percentage visibly advances for the judges.
+    done = [False]
+    ticker = None
+    if status_suffix_fn:
+        async def _ticker():
+            while not done[0]:
+                await asyncio.sleep(1.2)
+                if items and not done[0]:
+                    await _emit()
+        ticker = asyncio.create_task(_ticker())
+
+    try:
+        await asyncio.gather(_writer(), _Handler(stream.output_stream).handle_events())
+    finally:
+        done[0] = True
+        if ticker:
+            await ticker
     if items:
         await _emit()  # final live frame so the cockpit shows the full transcript before "done"
 
