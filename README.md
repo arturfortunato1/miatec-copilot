@@ -127,7 +127,7 @@ speakers, edit the note, dismiss a consideration → **Approve & Write to miatec
 | `agents/translator.py` | Claude/Nova batch translation pt-BR → clinical English; cached per transcript; original kept |
 | `agents/roles.py` | Claude/Nova role attribution + confidence; HITL confirm/swap (`POST /roles`) |
 | `agents/structuring.py` | Claude/Nova strict-JSON SOAP, Pydantic-validated |
-| `agents/evidence.py` | Exa `search_and_contents` — real guideline citations |
+| `agents/evidence.py` | Exa `search_and_contents`, **tiered**: authoritative clinical domains first; broadens to the open web only when the on-topic yield is thin — the strategy is narrated live |
 | `agents/verifier.py` | Claude/Nova evidence↔note alignment check; low alignment → caution branch |
 | `agents/considerations.py` | Claude/Nova ranked differentials (hedges on low alignment) |
 | `agents/record.py` | **AWS DynamoDB** conditional put — idempotency key as partition key, retries can't double-write (provision: `scripts/provision_miatec_table.sh`) |

@@ -29,6 +29,7 @@ export type Evidence = {
   url: string;
   snippet?: string | null;
   score?: number | null;
+  tier?: string | null; // "authoritative" | "open-web" — the Exa retrieval tier that found it
 };
 
 export type Consideration = {

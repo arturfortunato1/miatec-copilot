@@ -54,10 +54,19 @@ Entry into the miatec app follows from the staged record; a direct miatec REST w
   *simulated* write (`degraded: true`), so the loop still plays.
 - **Code:** `backend/app/agents/record.py`.
 
-## Evidence → Exa (separate key, not AWS)
+## Evidence → Exa (separate key, not AWS) — tiered retrieval strategy
 **Implemented** — `search_and_contents` (`type=auto`, highlights) over a query built from the note's
-chief complaint + review of systems; returns cited claims, or **"no strong evidence found"** instead of
-a hallucinated citation. Unkeyed it falls back to canned authoritative hits so the loop still plays.
+chief complaint + review of systems, with a **two-tier strategy the agent decides per query**:
+1. **Authoritative pass** — `include_domains` scoped to clinical guideline bodies, PubMed/NCBI,
+   UpToDate, NICE, WHO, SBC, and BR ministry-of-health domains.
+2. **Broaden** — domain-scoped search returns the closest *in-domain* pages even when off-topic (its
+   scores are rank-normalized, so they can't gate relevance), so hits only count toward the
+   "good-enough" bar when they lexically overlap the query; fewer than 3 on-topic → the agent
+   broadens to the open web and merges (deduped, on-topic authoritative first).
+
+The chosen strategy is narrated over SSE (visible in the cockpit's Evidence panel) and each card
+carries its tier badge. Returns **"no strong evidence found"** instead of a hallucinated citation.
+Unkeyed it falls back to canned authoritative hits so the loop still plays.
 - **Env:** `EXA_API_KEY`. **Code:** `backend/app/agents/evidence.py`.
 
 ---

@@ -237,6 +237,18 @@ export function EvidenceBody({
           <a href={e.url} target="_blank" rel="noopener noreferrer">
             <span className="idx">[{i}]</span> {e.source} ↗
           </a>
+          {e.tier === "authoritative" && (
+            <span
+              title="Found in the authoritative-first Exa pass (clinical guideline / literature domains)"
+              style={{
+                marginLeft: 8, fontSize: 9, letterSpacing: "0.08em", textTransform: "uppercase",
+                color: "#FBBF24", border: "1px solid currentColor", borderRadius: 3,
+                padding: "1px 5px", opacity: 0.9, whiteSpace: "nowrap",
+              }}
+            >
+              authoritative
+            </span>
+          )}
         </div>
       ))}
     </>
