@@ -218,14 +218,3 @@ The state object is a single typed dict that flows through the LangGraph nodes. 
 10. Close + ask.
 
 ---
-
-## 11. Tonight's pre-kickoff prep (allowed — planning only, NO code/designs/prototypes)
-
-- ✅ Lock the agent map, the note schema, and the one-paragraph pitch (in your head/on paper).
-- ✅ Read the Exa, AWS Transcribe, Bedrock, Vercel AI SDK, and Stripe quickstart docs.
-- ✅ Have miatec running and know its API endpoints + auth cold (it predates the event — fine).
-- ✅ Dev environment installed and logged in: Node, Python 3.12, AWS CLI, Vercel CLI, git.
-- ✅ Decide stack + roles with your team; line up your demo "patient" and a 2-min consult script idea.
-- ❌ Do NOT write code, build mockups/Figma, or stand up any prototype before noon June 9.
-
-**The miatec line to have ready if asked:** "miatec is my pre-existing commercial hospital product. What I built here is the agentic layer and its integration into miatec." True, clean, and it's exactly what makes the moat legitimate.
