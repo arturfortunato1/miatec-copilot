@@ -3,6 +3,7 @@
 // supplies the header/status/tags; these render only the artifact each agent produced.
 import { useEffect, useRef, useState } from "react";
 
+import { AudioPlayer } from "@/components/AudioPlayer";
 import type {
   ClinicalNote,
   Consideration,
@@ -33,11 +34,15 @@ export function TranscriptBody({
   roles,
   onSwap,
   busy,
+  audioUrl,
+  audioName,
 }: {
   transcript: TranscriptSegment[];
   roles: SpeakerRoles | null;
   onSwap: () => void;
   busy: boolean;
+  audioUrl: string | null;
+  audioName: string | null;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [showOriginal, setShowOriginal] = useState(false);
@@ -87,6 +92,13 @@ export function TranscriptBody({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
+      {audioUrl && <AudioPlayer src={audioUrl} name={audioName} />}
+      {hasTranslation && (
+        <div className="translate-note">
+          <b>Translate</b> is a real agent in the pipeline — shown so you can follow this Portuguese
+          recording. In a same-language clinic it&rsquo;s a pass-through, not needed day-to-day.
+        </div>
+      )}
       {(roles || hasTranslation) && (
         <div className="roles-bar">
           {roles && (

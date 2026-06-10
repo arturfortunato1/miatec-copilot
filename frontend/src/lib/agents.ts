@@ -19,6 +19,7 @@ export type AgentMeta = {
   accent: string; // hex, projector-bright
   sponsor: string | null; // the real tool/API surfaced under the marquee
   confidence: ConfidenceSource;
+  note?: string; // optional explainer surfaced as a tooltip on the flow node
 };
 
 export const AGENTS: AgentMeta[] = [
@@ -41,6 +42,7 @@ export const AGENTS: AgentMeta[] = [
     accent: "#22D3EE",
     sponsor: "Claude · AI Gateway",
     confidence: null,
+    note: "A real agent in the graph — here so you can follow this pt-BR recording. In a same-language clinic it's a pass-through, not needed day-to-day.",
   },
   {
     key: "roles",

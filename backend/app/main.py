@@ -17,10 +17,12 @@ import asyncio
 import json
 import os
 from typing import Optional
+from urllib.parse import urlparse
 
 from dotenv import find_dotenv, load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -28,6 +30,7 @@ from app.agents.considerations import run_considerations
 from app.agents.evidence import run_evidence
 from app.agents.structuring import run_structuring
 from app.agents.verifier import run_verifier
+from app.aws import aws_configured
 from app.events import publish, subscribe, unsubscribe
 from app.graph import encounter_graph
 from app.schema import ClinicalNote
@@ -122,6 +125,48 @@ async def get_state(session_id: str) -> dict:
     if state is None:
         raise HTTPException(404, "unknown session")
     return state
+
+
+def _presign(s3_uri: str) -> str:
+    """Sign a short-lived GET URL for an s3:// object so the browser can play it directly.
+
+    Force SigV4 + the regional virtual-hosted endpoint — a default (SigV2 / global) presigned URL is
+    rejected by S3 for a bucket outside us-east-1 (this bucket is us-west-2).
+    """
+    import boto3  # lazy
+    from botocore.config import Config
+
+    p = urlparse(s3_uri)
+    s3 = boto3.client(
+        "s3",
+        region_name=os.getenv("AWS_REGION", "us-west-2"),
+        config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+    )
+    return s3.generate_presigned_url(
+        "get_object", Params={"Bucket": p.netloc, "Key": p.path.lstrip("/")}, ExpiresIn=3600)
+
+
+@app.get("/audio/{session_id}")
+async def audio(session_id: str):
+    """Redirect to a presigned URL for the session's ORIGINAL recording in S3.
+
+    Lets the cockpit play the real pt-BR consultation audio (proof it's a real recording, not a
+    canned transcript). Resolves the session's audio_ref (falls back to DEFAULT_AUDIO_REF); 404s on
+    the stub path where there is no real recording. Generated per request so the link is always fresh.
+    """
+    state = await _values(session_id)
+    audio_ref = (state or {}).get("audio_ref") or os.getenv("DEFAULT_AUDIO_REF")
+    if not audio_ref or not str(audio_ref).startswith("s3://"):
+        raise HTTPException(404, "no original recording for this session")
+    if not aws_configured():
+        raise HTTPException(503, "audio storage not configured")
+    try:
+        url = await asyncio.to_thread(_presign, audio_ref)
+    except Exception as exc:  # noqa: BLE001 — surface as a clear client error
+        raise HTTPException(502, f"could not sign the recording URL: {exc}")
+    resp = RedirectResponse(url, status_code=302)
+    resp.headers["Cache-Control"] = "no-store"   # never let CloudFront cache an expiring link
+    return resp
 
 
 @app.post("/roles")

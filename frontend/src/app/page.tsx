@@ -146,6 +146,9 @@ export default function ControlRoom() {
     active === "roles" ? AGENT_META.roles.accent
     : active === "translate" ? AGENT_META.translate.accent
     : AGENT_META.scribe.accent;
+  // Only offer the recording when Scribe ran on real S3/cached audio (not the stub path).
+  const realAudio = dir.audio.source === "s3" || dir.audio.source === "cache";
+  const audioUrl = realAudio && sessionId ? `${API_BASE}/audio/${sessionId}` : null;
 
   return (
     <div className="cr-shell">
@@ -190,7 +193,7 @@ export default function ControlRoom() {
               metric={dir.qualityScore != null ? { label: "signal", value: dir.qualityScore } : null}
               flush
             >
-              <TranscriptBody transcript={dir.transcript} roles={dir.roles} onSwap={onSwapRoles} busy={busy} />
+              <TranscriptBody transcript={dir.transcript} roles={dir.roles} onSwap={onSwapRoles} busy={busy} audioUrl={audioUrl} audioName={dir.audio.name ?? null} />
             </Panel>
 
             <Panel

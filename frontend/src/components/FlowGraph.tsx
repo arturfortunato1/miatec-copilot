@@ -50,7 +50,7 @@ export function FlowGraph({
           const edgeFlow = next ? activeAgent === next.key && statuses[next.key] !== "done" : false;
           return (
             <FlowFragment key={a.key}>
-              <div className="fnode" data-state={state} data-status={statuses[a.key]} style={{ ["--accent" as string]: a.accent }}>
+              <div className="fnode" data-state={state} data-status={statuses[a.key]} title={a.note} style={{ ["--accent" as string]: a.accent }}>
                 <div className="fnode-disc">{statuses[a.key] === "done" && !active ? "✓" : a.num}</div>
                 <div className="fnode-label">{a.label}</div>
                 {br && (
