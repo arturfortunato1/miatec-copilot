@@ -13,4 +13,5 @@ langchain-core>=0.3
 anthropic>=0.40          # Structuring + Considerations  (or Claude via Bedrock/boto3)
 openai>=1.40             # LLM layer → Vercel AI Gateway (OpenAI-compatible endpoint)
 exa-py>=1.8              # Evidence agent
-boto3>=1.34              # AWS Transcribe + S3 (+ Bedrock)
+boto3>=1.34              # AWS Transcribe batch + S3 (+ Bedrock)
+amazon-transcribe>=0.6   # AWS Transcribe STREAMING (Scribe progressive-load path)

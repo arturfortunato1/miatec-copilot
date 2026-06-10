@@ -15,11 +15,12 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/*
 
-# Core deps + the real integration SDKs (boto3 → Transcribe/S3/Bedrock, exa-py → Evidence,
-# anthropic + openai → the LLM layer incl. the Vercel AI Gateway path).
+# Core deps + the real integration SDKs (boto3 → Transcribe batch/S3/Bedrock,
+# amazon-transcribe → Transcribe streaming, exa-py → Evidence, anthropic + openai → the LLM layer
+# incl. the Vercel AI Gateway path).
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir "boto3>=1.34" "exa-py>=1.8" "anthropic>=0.40" "openai>=1.40"
+    && pip install --no-cache-dir "boto3>=1.34" "amazon-transcribe>=0.6" "exa-py>=1.8" "anthropic>=0.40" "openai>=1.40"
 
 COPY app ./app
 
